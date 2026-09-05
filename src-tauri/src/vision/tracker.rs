@@ -53,7 +53,7 @@ impl HitTracker {
             let yf = y as f32;
 
             let mut best_match_idx = None;
-            let mut min_dist_sq = 45.0 * 45.0; // 45px association radius
+            let mut min_dist_sq = 32.0 * 32.0; // 32px association radius (prevents merging simultaneous adjacent hits)
 
             for (idx, track) in self.active_tracks.iter().enumerate() {
                 if matched_tracks[idx] || track.element != element {
@@ -66,7 +66,7 @@ impl HitTracker {
                 let dist_sq = dx * dx + dy * dy;
 
                 // Numbers must move upward or stay relatively stable (not jump downwards)
-                if dist_sq < min_dist_sq && yf <= track.y + 10.0 {
+                if dist_sq < min_dist_sq && yf <= track.y + 12.0 {
                     min_dist_sq = dist_sq;
                     best_match_idx = Some(idx);
                 }
@@ -90,8 +90,8 @@ impl HitTracker {
                 }
 
                 // In Genshin Impact, genuine damage numbers float upward as they animate.
-                // We require 2 frames and >= 2.0px upward drift.
-                if track.frames_seen >= 2 && !track.emitted && !track.is_static && dy_up >= 2.0 {
+                // We require 2 frames and >= 1.5px upward drift.
+                if track.frames_seen >= 2 && !track.emitted && !track.is_static && dy_up >= 1.5 {
                     track.emitted = true;
                     confirmed.push(ConfirmedHit {
                         value: track.peak_value,
@@ -137,8 +137,7 @@ impl HitTracker {
             if track.frames_missing > 4 {
                 let dy_up = track.initial_y - track.y;
                 let can_flush = !track.emitted && !track.is_static && (
-                    // Standard flush
-                    (track.frames_seen >= 2 && dy_up >= 2.0)
+                    (track.frames_seen >= 2 && dy_up >= 1.5) || (track.frames_seen >= 3 && !track.is_static)
                 );
                 if can_flush {
                     track.emitted = true;

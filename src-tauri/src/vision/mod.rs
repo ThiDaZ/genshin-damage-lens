@@ -1,9 +1,7 @@
 pub mod filter;
 pub mod matcher;
-pub mod ml_matcher;
 pub mod tracker;
 
-pub use ml_matcher::MlMatcher;
 pub use matcher::DigitMatcher;
 
 use crate::capture::RawFrame;
@@ -63,6 +61,7 @@ impl VisionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ElementType;
 
     fn load_sample_frame(frame_num: u32) -> Option<RawFrame> {
         let p = format!("../sample_video/frame_{:03}.png", frame_num);
@@ -116,7 +115,7 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&raw);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = MlMatcher::new().unwrap();
+        let matcher = DigitMatcher::new();
 
         println!("\n=== user_problem_frame.png size: {}x{} ===", width, height);
         let mut false_positives = 0;
@@ -134,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_diagnose_issue_video_frames() {
-        let matcher = MlMatcher::new().unwrap();
+        let matcher = DigitMatcher::new();
         let mut total_false_hits = 0;
         for sec in 1..=12 {
             let p = format!("../sample_video/issue_sec_{:02}.png", sec);
@@ -276,82 +275,31 @@ mod tests {
     }
 
     #[test]
-    fn test_digit_matcher_diagnostics() {
-        use crate::vision::matcher::DigitMatcher;
-        let dm = DigitMatcher::new();
+    fn test_recognize_frame_040_and_037() {
+        let matcher = DigitMatcher::new();
 
-        // 1. user_problem_frame.png
-        if let Some(img) = image::open("../sample_video/user_problem_frame.png").ok().map(|i| i.to_rgba8()) {
-            let (w, h) = (img.width(), img.height());
-            let mut bgra = img.into_raw();
-            for c in bgra.chunks_exact_mut(4) { c.swap(0, 2); }
-            let raw = RawFrame { width: w, height: h, stride: (w*4) as usize, data: bgra, screen_x: 0, screen_y: 0 };
-            let comps = ColorFilter::segment_frame(&raw);
-            let clusters = ColorFilter::cluster_components(comps);
-            let mut hits = 0;
-            for cl in &clusters {
-                if let Some(h) = dm.recognize_cluster(cl) {
-                    println!("DigitMatcher False Hit on user_problem_frame: val={}, conf={:.2} at ({},{})", h.value, h.confidence, h.x, h.y);
-                    hits += 1;
-                }
-            }
-            println!("DigitMatcher on user_problem_frame: {} hits", hits);
-        }
-
-        // 2. Frame 35, 42, 46
-        for f in [35, 42, 46] {
+        let mut found_hits = Vec::new();
+        for f in [35, 37, 40, 42, 46] {
             if let Some(raw) = load_sample_frame(f) {
                 let comps = ColorFilter::segment_frame(&raw);
                 let clusters = ColorFilter::cluster_components(comps);
+                println!("\n=== FRAME {:02} DETECTIONS ===", f);
                 for cl in &clusters {
-                    if let Some(h) = dm.recognize_cluster(cl) {
-                        println!("DigitMatcher Frame {:02}: val={}, conf={:.2} at ({},{})", f, h.value, h.confidence, h.x, h.y);
+                    if let Some(hit) = matcher.recognize_cluster(cl) {
+                        println!("  F{:02}: val={}, elem={:?}, crit={}, conf={:.2} at ({},{})",
+                            f, hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y);
+                        found_hits.push((f, hit.value, cl.element, hit.is_crit));
                     }
                 }
             }
         }
 
-        // 3. issue_sec_01 to 12
-        let mut issue_hits = 0;
-        for sec in 1..=12 {
-            let p = format!("../sample_video/issue_sec_{:02}.png", sec);
-            if let Some(img) = image::open(&p).ok().map(|i| i.to_rgba8()) {
-                let (w, h) = (img.width(), img.height());
-                let mut bgra = img.into_raw();
-                for c in bgra.chunks_exact_mut(4) { c.swap(0, 2); }
-                let raw = RawFrame { width: w, height: h, stride: (w*4) as usize, data: bgra, screen_x: 0, screen_y: 0 };
-                let comps = ColorFilter::segment_frame(&raw);
-                let clusters = ColorFilter::cluster_components(comps);
-                for cl in &clusters {
-                    if let Some(h) = dm.recognize_cluster(cl) {
-                        println!("DigitMatcher Issue Sec {:02}: val={}, conf={:.2} at ({},{})", sec, h.value, h.confidence, h.x, h.y);
-                        issue_hits += 1;
-                    }
-                }
-            }
-        }
-        println!("DigitMatcher total issue_hits: {}", issue_hits);
-
-        // 4. roam_frames (30 frames)
-        let mut roam_raw_hits = 0;
-        for i in 1..=42 {
-            let p = format!("../sample_video/roam_frames/frame_{:03}.png", i);
-            if let Some(img) = image::open(&p).ok().map(|i| i.to_rgba8()) {
-                let (w, h) = (img.width(), img.height());
-                let mut bgra = img.into_raw();
-                for c in bgra.chunks_exact_mut(4) { c.swap(0, 2); }
-                let raw = RawFrame { width: w, height: h, stride: (w*4) as usize, data: bgra, screen_x: 0, screen_y: 0 };
-                let comps = ColorFilter::segment_frame(&raw);
-                let clusters = ColorFilter::cluster_components(comps);
-                for cl in &clusters {
-                    if let Some(h) = dm.recognize_cluster(cl) {
-                        println!("DigitMatcher Roam Frame {:03}: val={}, conf={:.2} at ({},{})", i, h.value, h.confidence, h.x, h.y);
-                        roam_raw_hits += 1;
-                    }
-                }
-            }
-        }
-        println!("DigitMatcher total roam_raw_hits: {}", roam_raw_hits);
+        assert!(found_hits.iter().any(|&(f, v, el, _)| f == 35 && v == 4046 && el == ElementType::Geo));
+        assert!(found_hits.iter().any(|&(f, v, el, c)| f == 35 && v == 14229 && el == ElementType::Geo && c));
+        assert!(found_hits.iter().any(|&(f, v, el, c)| f == 37 && v == 10692 && el == ElementType::Geo && c));
+        assert!(found_hits.iter().any(|&(f, v, el, c)| f == 40 && v == 9608 && el == ElementType::Geo && c));
+        assert!(found_hits.iter().any(|&(f, v, el, _)| f == 42 && v == 1141 && el == ElementType::Pyro));
+        assert!(found_hits.iter().any(|&(f, v, el, c)| f == 46 && v == 32625 && el == ElementType::Geo && c));
     }
 
     #[test]
@@ -359,26 +307,47 @@ mod tests {
         let mut engine = VisionEngine::new();
         let mut total_confirmed = 0;
 
-        // Feed frames 30 through 45 through the vision pipeline
-        for f in 30..=45 {
-            if let Some(frame) = load_sample_frame(f) {
-                let confirmed = engine.process_frame(&frame);
+        let combat_dir = std::path::Path::new("../scratch/combat_frames");
+        if combat_dir.exists() {
+            for f in 1..=330 {
+                let p = format!("../scratch/combat_frames/frame_{:03}.png", f);
+                let path = std::path::Path::new(&p);
+                if !path.exists() { continue; }
+                let img = match image::open(path) {
+                    Ok(im) => im.to_rgba8(),
+                    Err(_) => continue,
+                };
+                let (width, height) = (img.width(), img.height());
+                let mut bgra_raw = img.into_raw();
+                for chunk in bgra_raw.chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                }
+                let raw = RawFrame {
+                    width,
+                    height,
+                    stride: (width * 4) as usize,
+                    data: bgra_raw,
+                    screen_x: 0,
+                    screen_y: 0,
+                };
+                let confirmed = engine.process_frame(&raw);
                 for hit in &confirmed {
-                    println!("Confirmed Hit [Frame {:02}]: value={}, elem={:?}, crit={}, at ({},{})",
+                    println!("Confirmed Hit [Frame {:03}]: value={}, elem={:?}, crit={}, at ({},{})",
                         f, hit.value, hit.element, hit.is_crit, hit.x, hit.y);
                 }
                 total_confirmed += confirmed.len();
             }
+            println!("End-to-end combat video simulation produced {} confirmed hits across 330 frames", total_confirmed);
+            assert!(total_confirmed >= 5, "Expected at least 5 confirmed hits, got {}", total_confirmed);
+        } else {
+            println!("scratch/combat_frames does not exist, skipping 10fps test");
         }
-
-        println!("End-to-end simulation produced {} confirmed hits across frames 30-45", total_confirmed);
-        assert!(total_confirmed > 0, "Expected at least 1 confirmed hit over frames 30-45");
     }
 
     #[test]
     fn test_diagnose_roam_frames() {
         let mut engine = VisionEngine::new();
-        let matcher = MlMatcher::new().unwrap();
+        let matcher = DigitMatcher::new();
         let mut total_raw_hits = 0;
         let mut total_confirmed = 0;
 

@@ -137,10 +137,18 @@ pub fn run() {
             let state_clone = shared_state.clone();
             let running_clone = running.clone();
 
-            // Set initial click-through on main overlay window
+            // Set initial click-through and exclude overlay from capture (prevents self-capture feedback)
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_ignore_cursor_events(false); // Start interactive or toggleable
                 let _ = window.set_always_on_top(true);
+                #[cfg(windows)]
+                if let Ok(hwnd) = window.hwnd() {
+                    use windows::Win32::Foundation::HWND;
+                    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY};
+                    unsafe {
+                        let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WINDOW_DISPLAY_AFFINITY(17));
+                    }
+                }
             }
 
             // Spawn background vision & capture thread
@@ -148,7 +156,7 @@ pub fn run() {
                 let mut capture = ScreenCapture::new();
                 let mut vision = match VisionEngine::try_new() {
                     Ok(v) => {
-                        println!("[VisionEngine] Successfully loaded ML models and initialized engine.");
+                        println!("[VisionEngine] Successfully initialized High-Precision Damage Vision Engine.");
                         v
                     }
                     Err(e) => {

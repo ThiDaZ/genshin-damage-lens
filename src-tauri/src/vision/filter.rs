@@ -85,20 +85,29 @@ pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
 /// Classify pixel into Genshin damage element
 #[inline(always)]
 pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
-    // Digits in Genshin are brightly lit (V >= 60)
     let (h, s, v) = rgb_to_hsv(r, g, b);
 
-    if v < 60 {
+    if v < 58 {
         return None;
     }
 
-    // Physical: High brightness, low saturation (White / Silver)
-    if s <= 22 && v >= 82 {
+    // Physical: High brightness, very low saturation (White / Silver)
+    if s <= 18 && v >= 85 {
         return Some(ElementType::Physical);
     }
 
+    // Electro: Violet / Magenta / Pink (Glowing core can have low saturation down to 18)
+    if (245..=335).contains(&h) && s >= 18 && v >= 60 {
+        return Some(ElementType::Electro);
+    }
+
+    // Cryo: Ice Cyan / Frost Blue (Allow bright ice-blue cores down to saturation 22)
+    if (176..=205).contains(&h) && s >= 22 && v >= 65 {
+        return Some(ElementType::Cryo);
+    }
+
     // Elemental hits must have sufficient saturation
-    if s < 35 {
+    if s < 28 {
         return None;
     }
 
@@ -115,9 +124,9 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
         // Cryo: Ice Cyan / Frost Blue
         176..=205 => Some(ElementType::Cryo),
         // Hydro: Deep Ocean Blue
-        206..=245 => Some(ElementType::Hydro),
+        206..=244 => Some(ElementType::Hydro),
         // Electro: Violet / Magenta
-        246..=310 => Some(ElementType::Electro),
+        245..=335 => Some(ElementType::Electro),
         _ => None,
     }
 }
@@ -132,11 +141,13 @@ impl ColorFilter {
         let stride = frame.stride;
         let data = &frame.data;
 
-        // Skip borders (Genshin damage numbers appear in the central combat area)
-        let y_min = (h as f32 * 0.21) as usize; // Exclude top domain banner / header / quest objectives
-        let y_max = (h as f32 * 0.85) as usize; // Exclude bottom HP / burst bar
-        let x_min = (w as f32 * 0.12) as usize;
-        let x_max = (w as f32 * 0.88) as usize;
+        let scale = (h as f32 / 720.0).max(1.0);
+
+        // Dynamic combat viewport boundaries
+        let y_min = (h as f32 * 0.08) as usize; // Exclude top status/header
+        let y_max = (h as f32 * 0.90) as usize; // Exclude bottom player burst bar
+        let x_min = (w as f32 * 0.06) as usize;
+        let x_max = (w as f32 * 0.94) as usize;
 
         // Grid-based sampling for performance (stride 2x2 coarse pass)
         let mut visited = vec![false; w * h];
@@ -149,13 +160,18 @@ impl ColorFilter {
             for x in (x_min..x_max).step_by(2) {
                 let xf = x as f32 / w as f32;
 
-                // Left quest & item drop exclusion zone (Mora drops, quest text)
-                if xf < 0.28 && yf >= 0.22 && yf <= 0.72 {
+                // Exclude minimap & quest HUD in top-left
+                if xf < 0.16 && yf < 0.28 {
                     continue;
                 }
 
-                // Right party list exclusion zone (characters, portraits, keybinds)
-                if xf > 0.82 && yf >= 0.15 && yf <= 0.70 {
+                // Exclude only player bottom HP bar
+                if xf > 0.35 && xf < 0.65 && yf > 0.88 {
+                    continue;
+                }
+
+                // Exclude party member icons on far right
+                if xf > 0.89 && yf >= 0.15 && yf <= 0.65 {
                     continue;
                 }
 
@@ -176,7 +192,7 @@ impl ColorFilter {
 
                 if let Some(elem) = classify_element(r, g, b) {
                     // Flood-fill / connected component search within bounding window
-                    let comp = Self::extract_component(frame, x, y, elem, &mut visited);
+                    let comp = Self::extract_component(frame, x, y, elem, &mut visited, scale);
                     if let Some(c) = comp {
                         components.push(c);
                     }
@@ -252,6 +268,7 @@ impl ColorFilter {
         start_y: usize,
         target_elem: ElementType,
         visited: &mut [bool],
+        scale: f32,
     ) -> Option<DetectedComponent> {
         let w = frame.width as usize;
         let h = frame.height as usize;
@@ -269,7 +286,7 @@ impl ColorFilter {
         let mut count = 0;
 
         // Max component search radius to avoid exploding on large background planes
-        let max_pixels = 3000;
+        let max_pixels = (4000.0 * scale) as usize;
 
         while let Some((cx, cy)) = queue.pop() {
             count += 1;
@@ -313,26 +330,26 @@ impl ColorFilter {
         let comp_w = (max_x - min_x + 1) as u32;
         let comp_h = (max_y - min_y + 1) as u32;
 
-        // Exclude components whose vertical position extends into top/bottom UI zones
-        if (min_y as f32) < (h as f32 * 0.20) || (max_y as f32) > (h as f32 * 0.85) {
+        // Exclude components extending into extreme top/bottom margins
+        if (min_y as f32) < (h as f32 * 0.08) || (max_y as f32) > (h as f32 * 0.91) {
             return None;
         }
 
-        // Height filter for Genshin digit scale: numbers are 15px to max 40px tall at 720p (~55px at 1080p)
-        // Real crit digits are ~30-32px; environmental false positives often reach 36-49px
-        let max_glyph_h = (h as f32 * 0.055).max(40.0) as u32;
-        if comp_h < 15 || comp_h > max_glyph_h {
+        // Height filter scaled by viewport resolution: supports 720p through 4K
+        let min_glyph_h = (12.0 * scale) as u32;
+        let max_glyph_h = (55.0 * scale) as u32;
+        if comp_h < min_glyph_h || comp_h > max_glyph_h {
             return None;
         }
 
-        // Aspect ratio filter: single digits or multi-digit clumps
+        // Aspect ratio filter: single digits to wide multi-digit clumps
         let aspect = comp_w as f32 / comp_h as f32;
-        if aspect < 0.20 || aspect > 4.5 {
+        if aspect < 0.18 || aspect > 6.0 {
             return None;
         }
 
-        // Minimum pixel density (thin digit 1 can have ~14 pixels)
-        if count < 14 {
+        // Minimum pixel density
+        if count < (10.0 * scale) as usize {
             return None;
         }
 
@@ -372,11 +389,137 @@ impl ColorFilter {
         })
     }
 
+    /// Split a touching multi-digit component into individual glyph components via column projection valleys
+    pub fn split_component(comp: DetectedComponent, scale: f32) -> Vec<DetectedComponent> {
+        let w = comp.bbox.width as usize;
+        let h = comp.bbox.height as usize;
+        let aspect = w as f32 / h as f32;
+
+        // If aspect is typical for a single digit, return as is
+        // Single digits (even wide 0 or 8 or 3) have aspect <= 0.95.
+        // Two touching digits have aspect >= 1.15.
+        if aspect < 1.15 || w < (24.0 * scale) as usize {
+            return vec![comp];
+        }
+
+        // Compute column projection
+        let mut col_proj = vec![0usize; w];
+        for y in 0..h {
+            for x in 0..w {
+                if comp.mask[y * w + x] > 0 {
+                    col_proj[x] += 1;
+                }
+            }
+        }
+
+        let min_digit_w = (h as f32 * 0.28).max(5.0) as usize;
+        let mut splits = Vec::new();
+
+        let mut in_valley = false;
+        let mut best_valley_x = 0;
+        let mut min_val = usize::MAX;
+
+        for x in min_digit_w..(w.saturating_sub(min_digit_w)) {
+            let val = col_proj[x];
+            if val <= (h as f32 * 0.40) as usize {
+                if val < min_val {
+                    min_val = val;
+                    best_valley_x = x;
+                }
+                in_valley = true;
+            } else if in_valley {
+                if best_valley_x > 0 {
+                    let last_split = splits.last().copied().unwrap_or(0);
+                    if best_valley_x - last_split >= min_digit_w && w - best_valley_x >= min_digit_w {
+                        splits.push(best_valley_x);
+                    }
+                }
+                min_val = usize::MAX;
+                best_valley_x = 0;
+                in_valley = false;
+            }
+        }
+        if in_valley && best_valley_x > 0 {
+            let last_split = splits.last().copied().unwrap_or(0);
+            if best_valley_x - last_split >= min_digit_w && w - best_valley_x >= min_digit_w {
+                splits.push(best_valley_x);
+            }
+        }
+
+        if splits.is_empty() {
+            return vec![comp];
+        }
+
+        let mut result = Vec::new();
+        let mut prev_x = 0;
+        let mut boundaries = splits;
+        boundaries.push(w);
+
+        for bx in boundaries {
+            let sub_w = bx - prev_x;
+            if sub_w < 4 {
+                prev_x = bx;
+                continue;
+            }
+
+            let mut min_gx = usize::MAX;
+            let mut max_gx = 0;
+            let mut min_gy = usize::MAX;
+            let mut max_gy = 0;
+            let mut sub_pixels = 0;
+
+            for y in 0..h {
+                for x in 0..sub_w {
+                    if comp.mask[y * w + (prev_x + x)] > 0 {
+                        min_gx = min_gx.min(x);
+                        max_gx = max_gx.max(x);
+                        min_gy = min_gy.min(y);
+                        max_gy = max_gy.max(y);
+                        sub_pixels += 1;
+                    }
+                }
+            }
+
+            if sub_pixels >= (8.0 * scale) as usize && min_gx <= max_gx && min_gy <= max_gy {
+                let tight_w = (max_gx - min_gx + 1) as u32;
+                let tight_h = (max_gy - min_gy + 1) as u32;
+                let mut sub_mask = vec![0u8; (tight_w * tight_h) as usize];
+                for y in min_gy..=max_gy {
+                    for x in min_gx..=max_gx {
+                        if comp.mask[y * w + (prev_x + x)] > 0 {
+                            sub_mask[(y - min_gy) * tight_w as usize + (x - min_gx)] = 255;
+                        }
+                    }
+                }
+
+                result.push(DetectedComponent {
+                    bbox: BoundingBox {
+                        x: comp.bbox.x + (prev_x + min_gx) as u32,
+                        y: comp.bbox.y + min_gy as u32,
+                        width: tight_w,
+                        height: tight_h,
+                    },
+                    element: comp.element,
+                    pixel_count: sub_pixels,
+                    mask: sub_mask,
+                });
+            }
+
+            prev_x = bx;
+        }
+
+        if result.is_empty() {
+            vec![comp]
+        } else {
+            result
+        }
+    }
+
     /// Check if a component is an exclamation mark '!' (narrow and has vertical gap before dot)
     pub fn is_exclamation_glyph(c: &DetectedComponent) -> bool {
         let gw = c.bbox.width as usize;
         let gh = c.bbox.height as usize;
-        if gw == 0 || gh < 22 {
+        if gw == 0 || gh < 18 {
             return false;
         }
         let aspect = gw as f32 / gh as f32;
@@ -403,18 +546,41 @@ impl ColorFilter {
 
     /// Group individual digit components into horizontally-aligned damage clusters
     pub fn cluster_components(comps: Vec<DetectedComponent>) -> Vec<DamageCluster> {
-        let mut sorted = comps;
+        let max_y = comps.iter().map(|c| c.bbox.y + c.bbox.height).max().unwrap_or(720);
+        let scale = (max_y as f32 / 600.0).max(1.0);
+        Self::cluster_components_scaled(comps, scale)
+    }
+
+    /// Group components using explicit resolution scale factor
+    pub fn cluster_components_scaled(comps: Vec<DetectedComponent>, scale: f32) -> Vec<DamageCluster> {
+        // Expand any multi-digit components into separated glyphs
+        let mut individual_glyphs = Vec::with_capacity(comps.len() * 2);
+        for c in comps {
+            let split = Self::split_component(c, scale);
+            for s in split {
+                let aspect = s.bbox.width as f32 / s.bbox.height as f32;
+                let min_h = (12.0 * scale) as u32;
+                let max_h = (55.0 * scale) as u32;
+                let min_w = (4.0 * scale) as u32;
+                let max_w = (45.0 * scale) as u32;
+                let min_px = (8.0 * scale) as usize;
+
+                if s.bbox.height >= min_h && s.bbox.height <= max_h
+                    && s.bbox.width >= min_w && s.bbox.width <= max_w
+                    && s.pixel_count >= min_px
+                    && aspect >= 0.16 && aspect <= 1.10
+                {
+                    individual_glyphs.push(s);
+                }
+            }
+        }
+
+        let mut sorted = individual_glyphs;
         sorted.sort_by_key(|c| c.bbox.x);
 
         let mut raw_clusters: Vec<Vec<DetectedComponent>> = Vec::new();
 
         for c in sorted {
-            // Noise rejection: Genshin damage digits have reasonable height, width, and density
-            let aspect = c.bbox.width as f32 / c.bbox.height as f32;
-            if c.bbox.height < 15 || c.bbox.height > 40 || c.bbox.width < 5 || c.bbox.width > 30 || c.pixel_count < 14 || aspect < 0.20 || aspect > 0.95 {
-                continue;
-            }
-
             let mut matched_cluster = None;
             for cluster in raw_clusters.iter_mut() {
                 let last = cluster.last().unwrap();
@@ -422,7 +588,6 @@ impl ColorFilter {
                     continue;
                 }
 
-                // An exclamation mark in Genshin is narrow and has a gap between bar and dot
                 let is_last_exclamation = Self::is_exclamation_glyph(last);
                 if is_last_exclamation {
                     continue;
@@ -433,13 +598,14 @@ impl ColorFilter {
                 let max_h = last.bbox.height.max(c.bbox.height) as i32;
 
                 let is_curr_exclamation = Self::is_exclamation_glyph(&c);
-                let max_allowed_dy = if is_curr_exclamation { (max_h as f32 * 0.50) as i32 } else { (max_h as f32 * 0.35) as i32 };
-                let max_allowed_dh = if is_curr_exclamation { (max_h as f32 * 0.55) as i32 } else { (max_h as f32 * 0.35) as i32 };
+                let max_allowed_dy = if is_curr_exclamation { (max_h as f32 * 0.50) as i32 } else { (max_h as f32 * 0.40) as i32 };
+                let max_allowed_dh = if is_curr_exclamation { (max_h as f32 * 0.55) as i32 } else { (max_h as f32 * 0.40) as i32 };
 
                 if dy <= max_allowed_dy && dh <= max_allowed_dh {
                     let gap = c.bbox.x as i32 - (last.bbox.x + last.bbox.width) as i32;
-                    // Horizontal spacing: can touch (-6px) or have gap up to 0.70 * height
-                    if gap >= -6 && gap <= (max_h as f32 * 0.70) as i32 {
+                    let min_gap = (-8.0 * scale) as i32;
+                    let max_gap = (max_h as f32 * 0.70) as i32;
+                    if gap >= min_gap && gap <= max_gap {
                         matched_cluster = Some(cluster);
                         break;
                     }
@@ -460,13 +626,21 @@ impl ColorFilter {
                 continue;
             }
 
+            // Health bar rejection: a thin horizontal segmented bar where all slices are narrow sticks
+            let total_w: u32 = glyphs.iter().map(|g| g.bbox.width).sum();
+            let avg_asp = total_w as f32 / (glyphs.len() as f32 * glyphs[0].bbox.height as f32);
+            if glyphs.len() >= 3 && avg_asp < 0.35 && glyphs[0].bbox.height <= (18.0 * scale) as u32 {
+                continue;
+            }
+
             let element = glyphs[0].element;
             let mut bbox = glyphs[0].bbox;
             let mut is_crit = false;
 
+            let crit_height_threshold = (27.0 * scale) as u32;
             for g in &glyphs {
                 bbox = bbox.merge(&g.bbox);
-                if g.bbox.height >= 28 {
+                if g.bbox.height >= crit_height_threshold {
                     is_crit = true;
                 }
             }
