@@ -1,9 +1,0 @@
-[package]
-name = "scratch_ocrs"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-image = "0.25.10"
-ocrs = "0.13.0"
-rten = "0.26.0"

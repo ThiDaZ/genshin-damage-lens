@@ -37,3 +37,7 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
 ]
 
+[profile.dev.package."*"]
+opt-level = 3
+
+

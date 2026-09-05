@@ -3,20 +3,29 @@ pub mod matcher;
 pub mod ml_matcher;
 pub mod tracker;
 
+pub use ml_matcher::MlMatcher;
+pub use matcher::DigitMatcher;
+
 use crate::capture::RawFrame;
 use filter::ColorFilter;
-use ml_matcher::MlMatcher;
 use tracker::{ConfirmedHit, HitTracker};
 
 pub struct VisionEngine {
-    matcher: MlMatcher,
+    matcher: DigitMatcher,
     tracker: HitTracker,
 }
 
 impl VisionEngine {
+    pub fn try_new() -> Result<Self, String> {
+        Ok(Self {
+            matcher: DigitMatcher::new(),
+            tracker: HitTracker::new(),
+        })
+    }
+
     pub fn new() -> Self {
         Self {
-            matcher: MlMatcher::new().expect("Failed to initialize ML Matcher"),
+            matcher: DigitMatcher::new(),
             tracker: HitTracker::new(),
         }
     }
@@ -162,6 +171,10 @@ mod tests {
                 for (v, el, conf, x, y) in detected {
                     println!("   -> value={}, elem={:?}, conf={:.2} at ({},{})", v, el, conf, x, y);
                 }
+                for cl in &clusters {
+                    let box_strs: Vec<_> = cl.glyphs.iter().map(|g| format!("({},{} {}x{})", g.bbox.x, g.bbox.y, g.bbox.width, g.bbox.height)).collect();
+                    println!("      Cluster at ({},{}): {}", cl.bbox.x, cl.bbox.y, box_strs.join(" "));
+                }
             } else {
                 println!("Issue Sec {:02}: clean (0 hits)", sec);
             }
@@ -178,7 +191,7 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&frame);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = MlMatcher::new().unwrap();
+        let matcher = DigitMatcher::new();
 
         let mut found_4046 = false;
         let mut found_14229 = false;
@@ -220,7 +233,7 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&frame);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = MlMatcher::new().unwrap();
+        let matcher = DigitMatcher::new();
 
         let mut found_32625 = false;
         for cl in &clusters {
@@ -244,7 +257,7 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&frame);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = MlMatcher::new().unwrap();
+        let matcher = DigitMatcher::new();
 
 
 
@@ -260,6 +273,85 @@ mod tests {
             }
         }
         assert!(found_1141, "Failed to recognize Pyro 1141 in frame 42!");
+    }
+
+    #[test]
+    fn test_digit_matcher_diagnostics() {
+        use crate::vision::matcher::DigitMatcher;
+        let dm = DigitMatcher::new();
+
+        // 1. user_problem_frame.png
+        if let Some(img) = image::open("../sample_video/user_problem_frame.png").ok().map(|i| i.to_rgba8()) {
+            let (w, h) = (img.width(), img.height());
+            let mut bgra = img.into_raw();
+            for c in bgra.chunks_exact_mut(4) { c.swap(0, 2); }
+            let raw = RawFrame { width: w, height: h, stride: (w*4) as usize, data: bgra, screen_x: 0, screen_y: 0 };
+            let comps = ColorFilter::segment_frame(&raw);
+            let clusters = ColorFilter::cluster_components(comps);
+            let mut hits = 0;
+            for cl in &clusters {
+                if let Some(h) = dm.recognize_cluster(cl) {
+                    println!("DigitMatcher False Hit on user_problem_frame: val={}, conf={:.2} at ({},{})", h.value, h.confidence, h.x, h.y);
+                    hits += 1;
+                }
+            }
+            println!("DigitMatcher on user_problem_frame: {} hits", hits);
+        }
+
+        // 2. Frame 35, 42, 46
+        for f in [35, 42, 46] {
+            if let Some(raw) = load_sample_frame(f) {
+                let comps = ColorFilter::segment_frame(&raw);
+                let clusters = ColorFilter::cluster_components(comps);
+                for cl in &clusters {
+                    if let Some(h) = dm.recognize_cluster(cl) {
+                        println!("DigitMatcher Frame {:02}: val={}, conf={:.2} at ({},{})", f, h.value, h.confidence, h.x, h.y);
+                    }
+                }
+            }
+        }
+
+        // 3. issue_sec_01 to 12
+        let mut issue_hits = 0;
+        for sec in 1..=12 {
+            let p = format!("../sample_video/issue_sec_{:02}.png", sec);
+            if let Some(img) = image::open(&p).ok().map(|i| i.to_rgba8()) {
+                let (w, h) = (img.width(), img.height());
+                let mut bgra = img.into_raw();
+                for c in bgra.chunks_exact_mut(4) { c.swap(0, 2); }
+                let raw = RawFrame { width: w, height: h, stride: (w*4) as usize, data: bgra, screen_x: 0, screen_y: 0 };
+                let comps = ColorFilter::segment_frame(&raw);
+                let clusters = ColorFilter::cluster_components(comps);
+                for cl in &clusters {
+                    if let Some(h) = dm.recognize_cluster(cl) {
+                        println!("DigitMatcher Issue Sec {:02}: val={}, conf={:.2} at ({},{})", sec, h.value, h.confidence, h.x, h.y);
+                        issue_hits += 1;
+                    }
+                }
+            }
+        }
+        println!("DigitMatcher total issue_hits: {}", issue_hits);
+
+        // 4. roam_frames (30 frames)
+        let mut roam_raw_hits = 0;
+        for i in 1..=42 {
+            let p = format!("../sample_video/roam_frames/frame_{:03}.png", i);
+            if let Some(img) = image::open(&p).ok().map(|i| i.to_rgba8()) {
+                let (w, h) = (img.width(), img.height());
+                let mut bgra = img.into_raw();
+                for c in bgra.chunks_exact_mut(4) { c.swap(0, 2); }
+                let raw = RawFrame { width: w, height: h, stride: (w*4) as usize, data: bgra, screen_x: 0, screen_y: 0 };
+                let comps = ColorFilter::segment_frame(&raw);
+                let clusters = ColorFilter::cluster_components(comps);
+                for cl in &clusters {
+                    if let Some(h) = dm.recognize_cluster(cl) {
+                        println!("DigitMatcher Roam Frame {:03}: val={}, conf={:.2} at ({},{})", i, h.value, h.confidence, h.x, h.y);
+                        roam_raw_hits += 1;
+                    }
+                }
+            }
+        }
+        println!("DigitMatcher total roam_raw_hits: {}", roam_raw_hits);
     }
 
     #[test]

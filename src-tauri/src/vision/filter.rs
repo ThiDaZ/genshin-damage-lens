@@ -409,8 +409,9 @@ impl ColorFilter {
         let mut raw_clusters: Vec<Vec<DetectedComponent>> = Vec::new();
 
         for c in sorted {
-            // Noise rejection: Genshin damage digits have reasonable height and density
-            if c.bbox.height < 15 || c.bbox.height > 40 || c.bbox.width < 5 || c.pixel_count < 14 {
+            // Noise rejection: Genshin damage digits have reasonable height, width, and density
+            let aspect = c.bbox.width as f32 / c.bbox.height as f32;
+            if c.bbox.height < 15 || c.bbox.height > 40 || c.bbox.width < 5 || c.bbox.width > 30 || c.pixel_count < 14 || aspect < 0.20 || aspect > 0.95 {
                 continue;
             }
 

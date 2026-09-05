@@ -9,16 +9,39 @@ pub struct MlMatcher {
     engine: Mutex<OcrEngine>,
 }
 
+fn load_model_file(filename: &str) -> Result<Vec<u8>, String> {
+    let candidates = [
+        format!("src-tauri/assets/{}", filename),
+        format!("assets/{}", filename),
+        format!("../assets/{}", filename),
+        format!("../../assets/{}", filename),
+    ];
+    for p in &candidates {
+        if let Ok(bytes) = std::fs::read(p) {
+            return Ok(bytes);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Ok(bytes) = std::fs::read(dir.join("assets").join(filename)) {
+                return Ok(bytes);
+            }
+            if let Ok(bytes) = std::fs::read(dir.join(filename)) {
+                return Ok(bytes);
+            }
+        }
+    }
+    Err(format!("Failed to locate model asset '{}' in any candidate path", filename))
+}
+
 impl MlMatcher {
     pub fn new() -> Result<Self, String> {
-        let rec_model = std::fs::read("assets/text-recognition.rten")
-            .unwrap_or_else(|_| std::fs::read("../assets/text-recognition.rten").expect("Failed to load rec model"));
-        let det_model = std::fs::read("assets/text-detection.rten")
-            .unwrap_or_else(|_| std::fs::read("../assets/text-detection.rten").expect("Failed to load det model"));
-            
+        let rec_model = load_model_file("text-recognition.rten")?;
+        let det_model = load_model_file("text-detection.rten")?;
+
         let engine = OcrEngine::new(OcrEngineParams {
-            detection_model: Some(Model::load(det_model).unwrap()),
-            recognition_model: Some(Model::load(rec_model).unwrap()),
+            detection_model: Some(Model::load(det_model).map_err(|e| format!("Failed to parse det model: {}", e))?),
+            recognition_model: Some(Model::load(rec_model).map_err(|e| format!("Failed to parse rec model: {}", e))?),
             ..Default::default()
         }).map_err(|e| format!("Failed to create OcrEngine: {}", e))?;
         Ok(Self {
@@ -80,26 +103,41 @@ impl MlMatcher {
             Ok(text) => text,
             Err(_) => return None,
         };
+        println!("OCR Raw Text: {:?} for cluster at ({},{})", text, cluster.bbox.x, cluster.bbox.y);
 
-        let mut parsed_value = 0;
-        let mut confidence = 0.0;
-        
+        // Rejection rule 1: Text must not contain alphabetic characters (no words, enemy names, reactions)
+        if text.chars().any(|c| c.is_alphabetic()) {
+            return None;
+        }
+
         let digits: String = text.chars().filter(|c| c.is_digit(10)).collect();
-        if let Ok(v) = digits.parse::<u32>() {
-            parsed_value = v;
-            confidence = 1.0; // Dummy confidence for now
+        // Rejection rule 2: Genshin damage numbers are at least 2 digits (e.g. 10 to 999,999)
+        if digits.len() < 2 {
+            return None;
         }
 
-        if parsed_value > 0 {
-            Some(RecognizedHit {
-                value: parsed_value,
-                is_crit: cluster.is_crit,
-                confidence,
-                x: cluster.bbox.x as i32,
-                y: cluster.bbox.y as i32,
-            })
+        // Rejection rule 3: Expected digit count must match the number of clustered glyphs
+        let min_expected_digits = if cluster.is_crit {
+            cluster.glyphs.len().saturating_sub(1)
         } else {
-            None
+            cluster.glyphs.len()
+        };
+
+        if digits.len() < min_expected_digits {
+            return None;
         }
+
+        let parsed_value = match digits.parse::<u32>() {
+            Ok(v) if v >= 10 => v,
+            _ => return None,
+        };
+
+        Some(RecognizedHit {
+            value: parsed_value,
+            is_crit: cluster.is_crit,
+            confidence: 1.0,
+            x: cluster.bbox.x as i32,
+            y: cluster.bbox.y as i32,
+        })
     }
 }

@@ -146,7 +146,16 @@ pub fn run() {
             // Spawn background vision & capture thread
             thread::spawn(move || {
                 let mut capture = ScreenCapture::new();
-                let mut vision = VisionEngine::new();
+                let mut vision = match VisionEngine::try_new() {
+                    Ok(v) => {
+                        println!("[VisionEngine] Successfully loaded ML models and initialized engine.");
+                        v
+                    }
+                    Err(e) => {
+                        eprintln!("[VisionEngine ERROR] Failed to initialize VisionEngine: {}", e);
+                        return;
+                    }
+                };
                 let mut last_stats_emit = Instant::now();
                 #[cfg(windows)]
                 let mut f8_was_down = false;
@@ -180,6 +189,7 @@ pub fn run() {
                             if !hits.is_empty() {
                                 let mut s = state_clone.lock();
                                 for hit in hits {
+                                    println!("[Hit Detected] {} {:?} (crit: {}) at ({},{})", hit.value, hit.element, hit.is_crit, hit.x, hit.y);
                                     let event = s.record_hit(hit.value, hit.element, hit.is_crit, hit.x, hit.y);
                                     let _ = app_handle.emit("damage-hit", &event);
                                 }
