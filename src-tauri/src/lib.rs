@@ -150,6 +150,8 @@ pub fn run() {
                 let mut last_stats_emit = Instant::now();
                 #[cfg(windows)]
                 let mut f8_was_down = false;
+                #[cfg(windows)]
+                let mut last_f8_time = Instant::now();
 
                 while running_clone.load(Ordering::Relaxed) {
                     let loop_start = Instant::now();
@@ -158,7 +160,8 @@ pub fn run() {
                     #[cfg(windows)]
                     {
                         let f8_down = unsafe { (GetAsyncKeyState(VK_F8.0 as i32) as u16 & 0x8000) != 0 };
-                        if f8_down && !f8_was_down {
+                        if f8_down && !f8_was_down && last_f8_time.elapsed() >= Duration::from_millis(250) {
+                            last_f8_time = Instant::now();
                             if let Some(window) = app_handle.get_webview_window("main") {
                                 let mut s = state_clone.lock();
                                 let new_state = !s.click_through;

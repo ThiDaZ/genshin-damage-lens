@@ -176,12 +176,14 @@ async function setupEventListeners() {
   // Toggle Click-Through mode
   btnClickthrough.addEventListener("click", toggleClickthrough);
 
-  // Fallback local keydown listener when overlay happens to have focus
-  window.addEventListener("keydown", (e) => {
-    if (e.key === "F8") {
-      toggleClickthrough();
-    }
-  });
+  // When running in a standard web browser outside Tauri, use local keydown
+  if (!listen) {
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "F8") {
+        toggleClickthrough();
+      }
+    });
+  }
 
   // Trigger test hit
   btnSimulate.addEventListener("click", async () => {
