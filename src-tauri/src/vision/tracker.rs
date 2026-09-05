@@ -44,6 +44,7 @@ impl HitTracker {
     ) -> Vec<ConfirmedHit> {
         let mut confirmed = Vec::new();
         let mut matched_tracks = vec![false; self.active_tracks.len()];
+        let mut new_tracks = Vec::new();
 
         for &(value, element, is_crit, x, y) in detections {
             let xf = x as f32;
@@ -94,7 +95,7 @@ impl HitTracker {
                 // New track candidate
                 let id = self.next_id;
                 self.next_id += 1;
-                self.active_tracks.push(TrackedHit {
+                new_tracks.push(TrackedHit {
                     id,
                     x: xf,
                     y: yf,
@@ -115,6 +116,9 @@ impl HitTracker {
                 self.active_tracks[idx].frames_missing += 1;
             }
         }
+
+        // Append new tracks
+        self.active_tracks.extend(new_tracks);
 
         // Flush un-emitted tracks that have at least 1 reliable observation before purging
         self.active_tracks.retain_mut(|track| {

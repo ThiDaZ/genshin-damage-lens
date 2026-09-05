@@ -31,11 +31,20 @@ impl BoundingBox {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DetectedComponent {
     pub bbox: BoundingBox,
     pub element: ElementType,
     pub pixel_count: usize,
     pub mask: Vec<u8>, // Local binary bitmap of the component
+}
+
+#[derive(Debug, Clone)]
+pub struct DamageCluster {
+    pub element: ElementType,
+    pub bbox: BoundingBox,
+    pub glyphs: Vec<DetectedComponent>,
+    pub is_crit: bool,
 }
 
 /// Fast RGB to HSV conversion:
@@ -274,6 +283,115 @@ impl ColorFilter {
             pixel_count: count,
             mask,
         })
+    }
+
+    /// Check if a component is an exclamation mark '!' (narrow and has vertical gap before dot)
+    pub fn is_exclamation_glyph(c: &DetectedComponent) -> bool {
+        let gw = c.bbox.width as usize;
+        let gh = c.bbox.height as usize;
+        if gw == 0 || gh < 22 {
+            return false;
+        }
+        let aspect = gw as f32 / gh as f32;
+        if aspect > 0.40 {
+            return false;
+        }
+
+        // Must have a gap between the bar and the dot (around 65%..85% of height)
+        let bottom_start = (gh as f32 * 0.65) as usize;
+        let bottom_end = (gh as f32 * 0.85) as usize;
+        for y in bottom_start..bottom_end {
+            let mut row_count = 0;
+            for x in 0..gw {
+                if c.mask[y * gw + x] > 0 {
+                    row_count += 1;
+                }
+            }
+            if row_count == 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Group individual digit components into horizontally-aligned damage clusters
+    pub fn cluster_components(comps: Vec<DetectedComponent>) -> Vec<DamageCluster> {
+        let mut sorted = comps;
+        sorted.sort_by_key(|c| c.bbox.x);
+
+        let mut raw_clusters: Vec<Vec<DetectedComponent>> = Vec::new();
+
+        for c in sorted {
+            // Noise rejection: Genshin damage digits have reasonable height and density
+            if c.bbox.height < 12 || c.bbox.height > 85 || c.bbox.width < 4 || c.pixel_count < 16 {
+                continue;
+            }
+
+            let mut matched_cluster = None;
+            for cluster in raw_clusters.iter_mut() {
+                let last = cluster.last().unwrap();
+                if last.element != c.element {
+                    continue;
+                }
+
+                // An exclamation mark in Genshin is narrow and has a gap between bar and dot
+                let is_last_exclamation = Self::is_exclamation_glyph(last);
+                if is_last_exclamation {
+                    continue;
+                }
+
+                let dy = (last.bbox.y as i32 - c.bbox.y as i32).abs();
+                let dh = (last.bbox.height as i32 - c.bbox.height as i32).abs();
+                let max_h = last.bbox.height.max(c.bbox.height) as i32;
+
+                let is_curr_exclamation = Self::is_exclamation_glyph(&c);
+                let max_allowed_dy = if is_curr_exclamation { (max_h as f32 * 0.50) as i32 } else { (max_h as f32 * 0.35) as i32 };
+                let max_allowed_dh = if is_curr_exclamation { (max_h as f32 * 0.55) as i32 } else { (max_h as f32 * 0.35) as i32 };
+
+                if dy <= max_allowed_dy && dh <= max_allowed_dh {
+                    let gap = c.bbox.x as i32 - (last.bbox.x + last.bbox.width) as i32;
+                    // Horizontal spacing: can touch (-6px) or have gap up to 0.70 * height
+                    if gap >= -6 && gap <= (max_h as f32 * 0.70) as i32 {
+                        matched_cluster = Some(cluster);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(cluster) = matched_cluster {
+                cluster.push(c);
+            } else {
+                raw_clusters.push(vec![c]);
+            }
+        }
+
+        let mut damage_clusters = Vec::new();
+        for glyphs in raw_clusters {
+            // Keep clusters with at least 2 glyphs
+            if glyphs.len() < 2 {
+                continue;
+            }
+
+            let element = glyphs[0].element;
+            let mut bbox = glyphs[0].bbox;
+            let mut is_crit = false;
+
+            for g in &glyphs {
+                bbox = bbox.merge(&g.bbox);
+                if g.bbox.height >= 28 {
+                    is_crit = true;
+                }
+            }
+
+            damage_clusters.push(DamageCluster {
+                element,
+                bbox,
+                glyphs,
+                is_crit,
+            });
+        }
+
+        damage_clusters
     }
 }
 

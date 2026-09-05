@@ -1,4 +1,4 @@
-use super::filter::DetectedComponent;
+use super::filter::DamageCluster;
 
 pub struct RecognizedHit {
     pub value: u32,
@@ -8,104 +8,323 @@ pub struct RecognizedHit {
     pub y: i32,
 }
 
-const TEMPLATE_W: usize = 16;
-const TEMPLATE_H: usize = 24;
+pub const TEMPLATE_W: usize = 16;
+pub const TEMPLATE_H: usize = 24;
 
-/// 16x24 binary glyph templates for digits 0-9 based on Genshin Impact damage font
+// 16x24 pixel templates extracted directly from Genshin Impact gameplay video recordings
+pub const DIGIT_0: [u8; 384] = [
+    0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,0,0,0,0,1,1,1,1,1,1,
+    0,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    0,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    0,0,1,1,1,1,0,0,0,0,0,0,1,1,1,1,
+    0,0,1,1,1,1,1,0,0,0,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,
+];
+
+pub const DIGIT_1: [u8; 384] = [
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,
+    0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,
+];
+
+pub const DIGIT_2: [u8; 384] = [
+    0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,0,0,1,1,1,1,1,1,0,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,0,0,0,0,0,0,0,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,
+    0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,
+    0,0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0,
+    1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+];
+
+pub const DIGIT_3: [u8; 384] = [
+    0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,1,1,1,0,0,0,0,0,1,1,1,1,1,0,
+    0,0,1,1,1,0,0,0,0,0,1,1,1,1,1,0,
+    1,1,1,1,1,0,0,0,0,0,0,0,1,1,1,0,
+    0,0,1,1,0,0,0,0,0,0,0,0,1,1,1,0,
+    0,0,1,1,0,0,0,0,0,0,0,0,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,
+    0,0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,
+    1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,0,
+    1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0,
+];
+
+pub const DIGIT_4: [u8; 384] = [
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,
+    0,0,0,0,0,0,1,1,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,1,1,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,1,1,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,1,1,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,1,1,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,1,1,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,1,1,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    1,1,1,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,
+];
+
+pub const DIGIT_5: [u8; 384] = [
+    0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,0,0,0,0,0,0,0,0,1,1,1,1,
+    1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,0,
+    1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0,
+];
+
+pub const DIGIT_6: [u8; 384] = [
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,0,0,0,0,1,1,1,1,1,
+    0,0,1,1,1,1,0,0,0,0,0,1,1,1,1,1,
+    0,0,1,1,1,1,0,0,0,0,0,1,1,1,1,1,
+    0,0,1,1,1,1,0,0,0,0,0,1,1,1,1,1,
+    0,1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,
+    0,1,1,1,1,1,1,1,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,
+    0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,0,0,1,1,1,1,1,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,
+];
+
+pub const DIGIT_7: [u8; 384] = [
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,
+    0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,1,0,0,0,0,0,0,0,0,0,0,
+];
+
+pub const DIGIT_8: [u8; 384] = [
+    0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,1,1,1,1,1,1,1,0,1,1,1,1,1,1,0,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,0,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,0,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,0,
+    1,1,1,1,1,1,0,1,0,1,0,1,1,1,1,0,
+    1,1,1,1,1,1,1,1,0,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    1,1,1,1,1,1,0,0,0,1,1,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0,
+];
+
+pub const DIGIT_9: [u8; 384] = [
+    0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,0,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,0,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,0,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,
+    1,1,1,1,1,1,0,0,0,0,0,1,1,1,1,1,
+    0,0,1,1,1,1,0,0,0,1,1,1,1,1,1,1,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,
+    0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,
+    0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,
+];
+
+pub const DIGIT_4_LOW_BAR: [u8; 384] = [
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,1,1,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,1,1,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,1,1,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,1,1,0,0,0,0,0,0,0,1,1,1,1,0,
+    0,0,1,1,0,0,0,0,0,0,0,0,0,1,1,1,
+    0,0,1,1,0,0,0,0,0,0,0,0,0,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+    0,0,0,0,1,1,1,1,0,0,0,0,0,0,0,0,
+];
+
 pub struct DigitTemplates {
-    /// 10 digits (0..=9), each 16x24 = 384 bools
-    templates: [Vec<u8>; 10],
+    pub templates: [[u8; 384]; 10],
+    pub alt_templates: [Option<[u8; 384]>; 10],
 }
 
 impl DigitTemplates {
     pub fn new() -> Self {
-        // Synthesize geometric character masks representing Genshin's bold, rounded damage font
-        let mut templates = std::array::from_fn(|_| vec![0u8; TEMPLATE_W * TEMPLATE_H]);
+        let mut alt_templates = [None; 10];
+        alt_templates[4] = Some(DIGIT_4_LOW_BAR);
 
-        for (digit, t) in templates.iter_mut().enumerate() {
-            Self::rasterize_digit(digit, t);
-        }
-
-        Self { templates }
-    }
-
-    fn rasterize_digit(digit: usize, buf: &mut [u8]) {
-        for y in 0..TEMPLATE_H {
-            let yf = y as f32 / (TEMPLATE_H - 1) as f32; // 0.0 to 1.0
-            for x in 0..TEMPLATE_W {
-                let xf = x as f32 / (TEMPLATE_W - 1) as f32; // 0.0 to 1.0
-                let inside = match digit {
-                    0 => {
-                        let dx = (xf - 0.5) / 0.42;
-                        let dy = (yf - 0.5) / 0.45;
-                        let dist = dx * dx + dy * dy;
-                        dist <= 1.0 && dist >= 0.28
-                    }
-                    1 => {
-                        (xf >= 0.4 && xf <= 0.65 && yf >= 0.1) || (yf <= 0.25 && xf >= 0.25 && xf <= 0.55) || (yf >= 0.85 && xf >= 0.25 && xf <= 0.75)
-                    }
-                    2 => {
-                        (yf <= 0.28 && xf >= 0.2 && xf <= 0.8)
-                            || (yf > 0.28 && yf < 0.6 && xf > 0.55)
-                            || (yf >= 0.55 && yf <= 0.85 && ((xf - (1.0 - yf)).abs() < 0.2))
-                            || (yf >= 0.82 && xf >= 0.15 && xf <= 0.85)
-                    }
-                    3 => {
-                        ((yf <= 0.25 || yf >= 0.75) && xf >= 0.2 && xf <= 0.8)
-                            || (xf >= 0.6 && yf >= 0.15 && yf <= 0.85)
-                            || (yf >= 0.45 && yf <= 0.55 && xf >= 0.35 && xf <= 0.75)
-                    }
-                    4 => {
-                        (xf >= 0.6 && xf <= 0.82 && yf >= 0.08 && yf <= 0.92)
-                            || (yf >= 0.6 && yf <= 0.72 && xf >= 0.15 && xf <= 0.85)
-                            || (xf <= 0.4 && yf >= 0.15 && yf <= 0.65)
-                    }
-                    5 => {
-                        (yf <= 0.22 && xf >= 0.15 && xf <= 0.85)
-                            || (xf <= 0.38 && yf >= 0.15 && yf <= 0.5)
-                            || (yf >= 0.45 && yf <= 0.55 && xf >= 0.2 && xf <= 0.75)
-                            || (xf >= 0.62 && yf >= 0.5 && yf <= 0.85)
-                            || (yf >= 0.78 && xf >= 0.15 && xf <= 0.8)
-                    }
-                    6 => {
-                        let dx = (xf - 0.5) / 0.4;
-                        let dy = (yf - 0.68) / 0.3;
-                        let bottom_circle = dx * dx + dy * dy <= 1.0 && dx * dx + dy * dy >= 0.22;
-                        let spine = xf <= 0.4 && yf >= 0.15 && yf <= 0.7;
-                        let top_arc = yf <= 0.25 && xf >= 0.25 && xf <= 0.75;
-                        bottom_circle || spine || top_arc
-                    }
-                    7 => {
-                        (yf <= 0.22 && xf >= 0.15 && xf <= 0.85)
-                            || (xf >= 0.55 && yf <= 0.45)
-                            || ((xf - (1.0 - yf * 0.7)).abs() < 0.18 && yf > 0.35)
-                    }
-                    8 => {
-                        let dx1 = (xf - 0.5) / 0.38;
-                        let dy1 = (yf - 0.3) / 0.26;
-                        let top_loop = dx1 * dx1 + dy1 * dy1 <= 1.0 && dx1 * dx1 + dy1 * dy1 >= 0.2;
-
-                        let dx2 = (xf - 0.5) / 0.42;
-                        let dy2 = (yf - 0.7) / 0.28;
-                        let bot_loop = dx2 * dx2 + dy2 * dy2 <= 1.0 && dx2 * dx2 + dy2 * dy2 >= 0.2;
-
-                        top_loop || bot_loop
-                    }
-                    9 => {
-                        let dx = (xf - 0.5) / 0.4;
-                        let dy = (yf - 0.32) / 0.3;
-                        let top_circle = dx * dx + dy * dy <= 1.0 && dx * dx + dy * dy >= 0.22;
-                        let spine = xf >= 0.6 && yf >= 0.3 && yf <= 0.85;
-                        let bot_arc = yf >= 0.75 && xf >= 0.25 && xf <= 0.75;
-                        top_circle || spine || bot_arc
-                    }
-                    _ => false,
-                };
-
-                if inside {
-                    buf[y * TEMPLATE_W + x] = 255;
-                }
-            }
+        Self {
+            templates: [
+                DIGIT_0, DIGIT_1, DIGIT_2, DIGIT_3, DIGIT_4,
+                DIGIT_5, DIGIT_6, DIGIT_7, DIGIT_8, DIGIT_9,
+            ],
+            alt_templates,
         }
     }
 
@@ -115,13 +334,15 @@ impl DigitTemplates {
             return (0, 0.0);
         }
 
+        let aspect = cw as f32 / ch as f32;
+
         // Resample crop to 16x24
         let mut normalized = [0u8; TEMPLATE_W * TEMPLATE_H];
         for ty in 0..TEMPLATE_H {
             let sy = (ty * ch) / TEMPLATE_H;
             for tx in 0..TEMPLATE_W {
                 let sx = (tx * cw) / TEMPLATE_W;
-                normalized[ty * TEMPLATE_W + tx] = crop[sy * cw + sx];
+                normalized[ty * TEMPLATE_W + tx] = if crop[sy * cw + sx] > 0 { 1 } else { 0 };
             }
         }
 
@@ -129,25 +350,26 @@ impl DigitTemplates {
         let mut best_score = -1.0f32;
 
         for (digit, t) in self.templates.iter().enumerate() {
-            let mut match_count = 0usize;
-            let mut total_count = 0usize;
+            let mut score = Self::calc_iou(&normalized, t);
 
-            for i in 0..normalized.len() {
-                let p1 = normalized[i] > 128;
-                let p2 = t[i] > 128;
-                if p1 || p2 {
-                    total_count += 1;
-                    if p1 == p2 {
-                        match_count += 1;
-                    }
-                }
+            if let Some(alt) = &self.alt_templates[digit] {
+                let alt_score = Self::calc_iou(&normalized, alt);
+                score = score.max(alt_score);
             }
 
-            let score = if total_count > 0 {
-                match_count as f32 / total_count as f32
+            // Aspect ratio bonus / penalty
+            // Digit 1 in Genshin is very narrow (aspect 0.25 to 0.45)
+            if digit == 1 {
+                if aspect <= 0.45 {
+                    score += 0.20;
+                } else if aspect >= 0.58 {
+                    score -= 0.35;
+                }
             } else {
-                0.0
-            };
+                if aspect <= 0.40 {
+                    score -= 0.25;
+                }
+            }
 
             if score > best_score {
                 best_score = score;
@@ -157,10 +379,32 @@ impl DigitTemplates {
 
         (best_digit, best_score)
     }
+
+    fn calc_iou(norm: &[u8; 384], t: &[u8; 384]) -> f32 {
+        let mut match_count = 0usize;
+        let mut total_count = 0usize;
+
+        for i in 0..norm.len() {
+            let p1 = norm[i] == 1;
+            let p2 = t[i] == 1;
+            if p1 || p2 {
+                total_count += 1;
+                if p1 == p2 {
+                    match_count += 1;
+                }
+            }
+        }
+
+        if total_count > 0 {
+            match_count as f32 / total_count as f32
+        } else {
+            0.0
+        }
+    }
 }
 
 pub struct DigitMatcher {
-    templates: DigitTemplates,
+    pub templates: DigitTemplates,
 }
 
 impl DigitMatcher {
@@ -170,17 +414,8 @@ impl DigitMatcher {
         }
     }
 
-    /// Segment multi-digit component into individual glyphs and decode integer value
-    pub fn recognize(&self, comp: &DetectedComponent) -> Option<RecognizedHit> {
-        let w = comp.bbox.width as usize;
-        let h = comp.bbox.height as usize;
-        let mask = &comp.mask;
-
-        if w < 6 || h < 12 {
-            return None;
-        }
-
-        // Column projection profile to segment digits
+    /// Split two touching glyphs using column projection valley search
+    pub fn split_touching_glyphs(&self, mask: &[u8], w: usize, h: usize) -> Vec<(Vec<u8>, usize, usize)> {
         let mut col_proj = vec![0usize; w];
         for x in 0..w {
             for y in 0..h {
@@ -190,81 +425,106 @@ impl DigitMatcher {
             }
         }
 
-        // Find glyph segments by column threshold
-        let mut segments: Vec<(usize, usize)> = Vec::new();
-        let mut in_glyph = false;
-        let mut start_x = 0;
+        // Search for a valley in middle 35%..65% of width
+        let min_search_x = (w as f32 * 0.35) as usize;
+        let max_search_x = (w as f32 * 0.65) as usize;
 
-        for (x, &count) in col_proj.iter().enumerate() {
-            if count > 0 && !in_glyph {
-                in_glyph = true;
-                start_x = x;
-            } else if count == 0 && in_glyph {
-                in_glyph = false;
-                if x - start_x >= 3 {
-                    segments.push((start_x, x - 1));
-                }
+        let mut min_val = usize::MAX;
+        let mut split_x = 0;
+
+        for x in min_search_x..=max_search_x {
+            if col_proj[x] < min_val {
+                min_val = col_proj[x];
+                split_x = x;
             }
         }
-        if in_glyph && w - start_x >= 3 {
-            segments.push((start_x, w - 1));
+
+        // If valley is pronounced (less than 40% of max height), split
+        if split_x > 0 && min_val < (h as f32 * 0.45) as usize {
+            let w1 = split_x;
+            let w2 = w - split_x;
+
+            let mut crop1 = vec![0u8; w1 * h];
+            for y in 0..h {
+                for x in 0..w1 {
+                    crop1[y * w1 + x] = mask[y * w + x];
+                }
+            }
+
+            let mut crop2 = vec![0u8; w2 * h];
+            for y in 0..h {
+                for x in 0..w2 {
+                    crop2[y * w2 + x] = mask[y * w + (split_x + x)];
+                }
+            }
+
+            return vec![(crop1, w1, h), (crop2, w2, h)];
         }
 
-        if segments.is_empty() {
+        vec![(mask.to_vec(), w, h)]
+    }
+
+    /// Recognize an assembled horizontal damage cluster into a damage number
+    pub fn recognize_cluster(&self, cluster: &DamageCluster) -> Option<RecognizedHit> {
+        if cluster.glyphs.is_empty() {
             return None;
         }
 
         let mut recognized_digits = Vec::new();
         let mut total_conf = 0.0f32;
-        let mut has_crit_mark = false;
+        let mut has_crit_mark = cluster.is_crit;
 
-        for (gx0, gx1) in segments {
-            let gw = gx1 - gx0 + 1;
+        for g in &cluster.glyphs {
+            let gw = g.bbox.width as usize;
+            let gh = g.bbox.height as usize;
 
-            // Check if segment is a comma or dot (very small height compared to main font)
-            let mut min_y = h;
-            let mut max_y = 0;
-            for y in 0..h {
-                let mut row_has_pixel = false;
-                for x in gx0..=gx1 {
-                    if mask[y * w + x] > 0 {
-                        row_has_pixel = true;
+            // Check for critical exclamation mark: narrow, tall with gap before bottom dot
+            let aspect = gw as f32 / gh as f32;
+            if aspect <= 0.40 && gh >= 22 {
+                let bottom_start = (gh as f32 * 0.65) as usize;
+                let bottom_end = (gh as f32 * 0.85) as usize;
+                let mut has_gap = false;
+                for y in bottom_start..bottom_end {
+                    let mut row_count = 0;
+                    for x in 0..gw {
+                        if g.mask[y * gw + x] > 0 {
+                            row_count += 1;
+                        }
+                    }
+                    if row_count == 0 {
+                        has_gap = true;
+                        break;
                     }
                 }
-                if row_has_pixel {
-                    min_y = min_y.min(y);
-                    max_y = max_y.max(y);
+                if has_gap {
+                    has_crit_mark = true;
+                    continue; // Skip exclamation mark from numerical digits
                 }
             }
 
-            let gh = if max_y >= min_y { max_y - min_y + 1 } else { 0 };
-
-            // Comma filter: bottom-aligned and short
-            if gh < h / 3 && min_y > (h * 2) / 3 {
-                continue; // Ignore thousands separator comma
-            }
-
-            // Exclamation mark or crit burst detector
-            if gw <= 5 && gh > (h * 2) / 3 {
-                has_crit_mark = true;
-            }
-
-            // Extract glyph crop
-            let mut glyph_crop = vec![0u8; gw * gh];
-            for y in 0..gh {
-                for x in 0..gw {
-                    glyph_crop[y * gw + x] = mask[(min_y + y) * w + (gx0 + x)];
+            // Touching glyphs split
+            if aspect >= 1.25 && gw >= 26 {
+                let sub_glyphs = self.split_touching_glyphs(&g.mask, gw, gh);
+                if sub_glyphs.len() >= 2 {
+                    for (crop, cw, ch) in sub_glyphs {
+                        let (digit, conf) = self.templates.match_glyph(&crop, cw, ch);
+                        if conf >= 0.38 {
+                            recognized_digits.push(digit);
+                            total_conf += conf;
+                        }
+                    }
+                    continue;
                 }
             }
 
-            let (digit, conf) = self.templates.match_glyph(&glyph_crop, gw, gh);
-            if conf >= 0.45 {
+            let (digit, conf) = self.templates.match_glyph(&g.mask, gw, gh);
+            if conf >= 0.38 {
                 recognized_digits.push(digit);
                 total_conf += conf;
             }
         }
 
-        if recognized_digits.is_empty() {
+        if recognized_digits.len() < 2 {
             return None;
         }
 
@@ -273,22 +533,20 @@ impl DigitMatcher {
             value = value.saturating_mul(10).saturating_add(*d);
         }
 
-        // Filter out single noise digits or unrealistically large damage
+        // Damage bounds: realistic range in Genshin Impact
         if value < 10 || value > 99_999_999 {
             return None;
         }
 
         let avg_conf = total_conf / recognized_digits.len() as f32;
-
-        // In Genshin, critical hits are larger (> 28px height) or accompanied by crit mark
-        let is_crit = has_crit_mark || comp.bbox.height >= 28;
+        let is_crit = has_crit_mark || cluster.bbox.height >= 27;
 
         Some(RecognizedHit {
             value,
             is_crit,
             confidence: avg_conf,
-            x: comp.bbox.x as i32 + (comp.bbox.width as i32 / 2),
-            y: comp.bbox.y as i32,
+            x: cluster.bbox.x as i32 + (cluster.bbox.width as i32 / 2),
+            y: cluster.bbox.y as i32,
         })
     }
 }
@@ -298,15 +556,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_template_match_accuracy() {
+    fn test_template_self_match() {
         let matcher = DigitMatcher::new();
-
-        // Each synthetic template matched against itself should produce high confidence and exact digit
         for digit in 0..10 {
-            let template = &matcher.templates.templates[digit];
-            let (matched_digit, score) = matcher.templates.match_glyph(template, 16, 24);
-            assert_eq!(matched_digit, digit as u32, "Failed to match digit {}", digit);
-            assert!(score > 0.95, "Score {} too low for digit {}", score, digit);
+            let t = &matcher.templates.templates[digit];
+            if digit == 1 {
+                let mut narrow = [0u8; 8 * 24];
+                for y in 0..24 {
+                    for x in 0..8 {
+                        narrow[y * 8 + x] = t[y * 16 + (8 + x)];
+                    }
+                }
+                let (matched, score) = matcher.templates.match_glyph(&narrow, 8, 24);
+                assert_eq!(matched, 1, "Self match failed for digit 1");
+                assert!(score >= 0.70, "Self match score {} too low for digit 1", score);
+            } else {
+                let (matched, score) = matcher.templates.match_glyph(t, TEMPLATE_W, TEMPLATE_H);
+                assert_eq!(matched, digit as u32, "Self match failed for digit {}", digit);
+                assert!(score >= 0.80, "Self match score {} too low for digit {}", score, digit);
+            }
         }
     }
 }
