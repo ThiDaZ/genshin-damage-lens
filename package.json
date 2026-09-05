@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
-    "tauri": "tauri"
+    "dev": "run.cmd dev",
+    "build": "run.cmd build",
+    "tauri": "run.cmd"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
