@@ -184,6 +184,9 @@ pub fn run() {
                                     let _ = app_handle.emit("damage-hit", &event);
                                 }
                             }
+                        } else {
+                            // Game is minimized or paused - clear tracking history
+                            vision.reset();
                         }
                     }
 

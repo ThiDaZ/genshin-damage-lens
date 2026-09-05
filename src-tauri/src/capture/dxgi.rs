@@ -186,12 +186,21 @@ impl DxgiCapture {
         let _ = unsafe { self.duplication.ReleaseFrame() };
 
         // Determine if Genshin window is running to crop capture
-        let mut crop_rect = None;
-        if let Some(hwnd) = WindowFinder::find_genshin() {
-            if let Some(rect) = WindowFinder::get_client_rect(hwnd) {
-                crop_rect = Some(rect);
+        let hwnd = match WindowFinder::find_genshin() {
+            Some(h) => h,
+            None => {
+                // Genshin is not running or is minimized - pause capture
+                return Ok(None);
             }
-        }
+        };
+
+        let crop = match WindowFinder::get_client_rect(hwnd) {
+            Some(r) => r,
+            None => {
+                // Invalid window bounds or minimized
+                return Ok(None);
+            }
+        };
 
         // Map staging buffer to read pixels
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -203,69 +212,44 @@ impl DxgiCapture {
         let p_data = mapped.pData as *const u8;
         let row_pitch = mapped.RowPitch as usize;
 
-        let frame = if let Some(crop) = crop_rect {
-            // Clip to desktop bounds
-            let x0 = crop.x.max(0) as u32;
-            let y0 = crop.y.max(0) as u32;
-            let x1 = (crop.x + crop.width as i32).max(0) as u32;
-            let y1 = (crop.y + crop.height as i32).max(0) as u32;
+        // Clip to desktop bounds
+        let x0 = crop.x.max(0) as u32;
+        let y0 = crop.y.max(0) as u32;
+        let x1 = (crop.x + crop.width as i32).max(0) as u32;
+        let y1 = (crop.y + crop.height as i32).max(0) as u32;
 
-            let cx0 = x0.min(self.width);
-            let cy0 = y0.min(self.height);
-            let cx1 = x1.min(self.width);
-            let cy1 = y1.min(self.height);
+        let cx0 = x0.min(self.width);
+        let cy0 = y0.min(self.height);
+        let cx1 = x1.min(self.width);
+        let cy1 = y1.min(self.height);
 
-            let crop_w = cx1.saturating_sub(cx0);
-            let crop_h = cy1.saturating_sub(cy0);
+        let crop_w = cx1.saturating_sub(cx0);
+        let crop_h = cy1.saturating_sub(cy0);
 
-            if crop_w > 100 && crop_h > 100 {
-                let mut data = vec![0u8; (crop_w * crop_h * 4) as usize];
-                for row in 0..crop_h {
-                    let src_offset = ((cy0 + row) as usize * row_pitch) + (cx0 as usize * 4);
-                    let dst_offset = (row * crop_w * 4) as usize;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            p_data.add(src_offset),
-                            data.as_mut_ptr().add(dst_offset),
-                            (crop_w * 4) as usize,
-                        );
-                    }
-                }
-
-                Some(RawFrame {
-                    width: crop_w,
-                    height: crop_h,
-                    stride: (crop_w * 4) as usize,
-                    data,
-                    screen_x: cx0 as i32,
-                    screen_y: cy0 as i32,
-                })
-            } else {
-                None
-            }
-        } else {
-            // Full desktop capture
-            let mut data = vec![0u8; (self.width * self.height * 4) as usize];
-            for row in 0..self.height {
-                let src_offset = row as usize * row_pitch;
-                let dst_offset = (row * self.width * 4) as usize;
+        let frame = if crop_w >= 640 && crop_h >= 480 {
+            let mut data = vec![0u8; (crop_w * crop_h * 4) as usize];
+            for row in 0..crop_h {
+                let src_offset = ((cy0 + row) as usize * row_pitch) + (cx0 as usize * 4);
+                let dst_offset = (row * crop_w * 4) as usize;
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         p_data.add(src_offset),
                         data.as_mut_ptr().add(dst_offset),
-                        (self.width * 4) as usize,
+                        (crop_w * 4) as usize,
                     );
                 }
             }
 
             Some(RawFrame {
-                width: self.width,
-                height: self.height,
-                stride: (self.width * 4) as usize,
+                width: crop_w,
+                height: crop_h,
+                stride: (crop_w * 4) as usize,
                 data,
-                screen_x: 0,
-                screen_y: 0,
+                screen_x: cx0 as i32,
+                screen_y: cy0 as i32,
             })
+        } else {
+            None
         };
 
         unsafe {

@@ -314,8 +314,9 @@ impl ColorFilter {
             return None;
         }
 
-        // Height filter for Genshin digit scale: typical numbers are 15px to 80px tall
-        if comp_h < 15 || comp_h > 80 {
+        // Height filter for Genshin digit scale: numbers are 15px to max 52px tall at 720p (~70px at 1080p)
+        let max_glyph_h = (h as f32 * 0.065).max(52.0) as u32;
+        if comp_h < 15 || comp_h > max_glyph_h {
             return None;
         }
 
@@ -404,7 +405,7 @@ impl ColorFilter {
 
         for c in sorted {
             // Noise rejection: Genshin damage digits have reasonable height and density
-            if c.bbox.height < 16 || c.bbox.height > 85 || c.bbox.width < 5 || c.pixel_count < 20 {
+            if c.bbox.height < 15 || c.bbox.height > 52 || c.bbox.width < 5 || c.pixel_count < 14 {
                 continue;
             }
 

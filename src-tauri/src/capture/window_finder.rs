@@ -6,7 +6,7 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetClientRect, IsWindowVisible,
+    FindWindowW, GetClientRect, IsWindowVisible, IsIconic,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +39,7 @@ impl WindowFinder {
             )
         };
         if let Ok(h) = hwnd {
-            if !h.0.is_null() && unsafe { IsWindowVisible(h).as_bool() } {
+            if !h.0.is_null() && unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() } {
                 return Some(h);
             }
         }
@@ -53,7 +53,7 @@ impl WindowFinder {
             )
         };
         if let Ok(h) = hwnd_cn {
-            if !h.0.is_null() && unsafe { IsWindowVisible(h).as_bool() } {
+            if !h.0.is_null() && unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() } {
                 return Some(h);
             }
         }
@@ -69,6 +69,10 @@ impl WindowFinder {
     #[cfg(windows)]
     pub fn get_client_rect(hwnd: HWND) -> Option<WindowRect> {
         unsafe {
+            if IsIconic(hwnd).as_bool() {
+                return None;
+            }
+
             let mut client_rect = RECT::default();
             if GetClientRect(hwnd, &mut client_rect).is_err() {
                 return None;
@@ -85,7 +89,8 @@ impl WindowFinder {
             let width = (client_rect.right - client_rect.left).max(0) as u32;
             let height = (client_rect.bottom - client_rect.top).max(0) as u32;
 
-            if width == 0 || height == 0 {
+            // Real Genshin client window is at least 640x480 and positioned on screen
+            if width < 640 || height < 480 || pt.x < -1000 || pt.y < -1000 {
                 return None;
             }
 

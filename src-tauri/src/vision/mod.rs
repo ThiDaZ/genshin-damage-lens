@@ -123,6 +123,52 @@ mod tests {
     }
 
     #[test]
+    fn test_diagnose_issue_video_frames() {
+        let matcher = DigitMatcher::new();
+        let mut total_false_hits = 0;
+        for sec in 1..=12 {
+            let p = format!("../sample_video/issue_sec_{:02}.png", sec);
+            let path = std::path::Path::new(&p);
+            if !path.exists() {
+                continue;
+            }
+            let img = image::open(path).unwrap().to_rgba8();
+            let (width, height) = (img.width(), img.height());
+            let mut bgra_raw = img.into_raw();
+            for chunk in bgra_raw.chunks_exact_mut(4) {
+                chunk.swap(0, 2);
+            }
+            let raw = RawFrame {
+                width,
+                height,
+                stride: (width * 4) as usize,
+                data: bgra_raw,
+                screen_x: 0,
+                screen_y: 0,
+            };
+
+            let comps = ColorFilter::segment_frame(&raw);
+            let clusters = ColorFilter::cluster_components(comps);
+            let mut detected = Vec::new();
+            for cl in &clusters {
+                if let Some(hit) = matcher.recognize_cluster(cl) {
+                    detected.push((hit.value, cl.element, hit.confidence, hit.x, hit.y));
+                }
+            }
+            total_false_hits += detected.len();
+            if !detected.is_empty() {
+                println!("Issue Sec {:02}: {} false hits:", sec, detected.len());
+                for (v, el, conf, x, y) in detected {
+                    println!("   -> value={}, elem={:?}, conf={:.2} at ({},{})", v, el, conf, x, y);
+                }
+            } else {
+                println!("Issue Sec {:02}: clean (0 hits)", sec);
+            }
+        }
+        assert_eq!(total_false_hits, 0, "Expected 0 false hits across issue video frames, found {}", total_false_hits);
+    }
+
+    #[test]
     fn test_recognize_frame_035_damage_4046_and_14229() {
         let frame = match load_sample_frame(35) {
             Some(f) => f,
