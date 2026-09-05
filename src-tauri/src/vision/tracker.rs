@@ -14,12 +14,14 @@ struct TrackedHit {
     id: u64,
     x: f32,
     y: f32,
+    initial_y: f32,
     element: ElementType,
     is_crit: bool,
     peak_value: u32,
     frames_seen: u32,
     frames_missing: u32,
     emitted: bool,
+    is_static: bool,
     #[allow(dead_code)]
     created_at: Instant,
 }
@@ -80,8 +82,13 @@ impl HitTracker {
                 track.frames_seen += 1;
                 track.frames_missing = 0;
 
-                // Emit once the number has been confirmed over 2-3 frames to avoid OCR flicker
-                if track.frames_seen >= 2 && !track.emitted {
+                // Detect static UI elements: if seen across 5+ frames with zero vertical displacement
+                if track.frames_seen >= 5 && (track.initial_y - track.y).abs() < 1.0 {
+                    track.is_static = true;
+                }
+
+                // Emit once the number has been confirmed over 2 frames to avoid OCR flicker
+                if track.frames_seen >= 2 && !track.emitted && !track.is_static {
                     track.emitted = true;
                     confirmed.push(ConfirmedHit {
                         value: track.peak_value,
@@ -99,12 +106,14 @@ impl HitTracker {
                     id,
                     x: xf,
                     y: yf,
+                    initial_y: yf,
                     element,
                     is_crit,
                     peak_value: value,
                     frames_seen: 1,
                     frames_missing: 0,
                     emitted: false,
+                    is_static: false,
                     created_at: Instant::now(),
                 });
             }
@@ -120,10 +129,10 @@ impl HitTracker {
         // Append new tracks
         self.active_tracks.extend(new_tracks);
 
-        // Flush un-emitted tracks that have at least 1 reliable observation before purging
+        // Flush un-emitted tracks that have at least 2 reliable observations before purging
         self.active_tracks.retain_mut(|track| {
             if track.frames_missing > 4 {
-                if !track.emitted && track.frames_seen >= 1 && track.peak_value >= 100 {
+                if !track.emitted && track.frames_seen >= 2 && !track.is_static && track.peak_value >= 100 {
                     track.emitted = true;
                     confirmed.push(ConfirmedHit {
                         value: track.peak_value,

@@ -48,31 +48,11 @@ function formatCompact(num) {
   return num.toString();
 }
 
-// Spawn floating in-game damage number
-function spawnFloatingHit(event) {
-  const hitEl = document.createElement("div");
-  hitEl.className = `floating-hit ${event.element} ${event.is_crit ? "crit" : "normal"}`;
-  hitEl.textContent = `${event.value.toLocaleString()}${event.is_crit ? "!" : ""}`;
-
-  // Use screen coordinates or fallback to random screen center
-  const screenW = window.innerWidth;
-  const screenH = window.innerHeight;
-
-  let x = event.x > 0 ? event.x : screenW * 0.45 + (Math.random() * 200 - 100);
-  let y = event.y > 0 ? event.y : screenH * 0.45 + (Math.random() * 150 - 75);
-
-  // Clamp within bounds
-  x = Math.max(80, Math.min(screenW - 80, x));
-  y = Math.max(120, Math.min(screenH - 120, y));
-
-  hitEl.style.left = `${x}px`;
-  hitEl.style.top = `${y}px`;
-
-  damageLayer.appendChild(hitEl);
-
-  setTimeout(() => {
-    hitEl.remove();
-  }, 1300);
+// Spawning floating damage numbers on screen is disabled during capture
+// to keep combat view clean and prevent DXGI desktop screen-capture feedback loops
+function spawnFloatingHit(_event) {
+  // Intentionally no-op: Genshin renders its own floating numbers in-game.
+  // The overlay displays combat metrics in the HUD and combat feed.
 }
 
 // Append hit to recent ticker
@@ -157,7 +137,6 @@ async function setupEventListeners() {
   if (listen) {
     // Listen to real-time damage hit
     await listen("damage-hit", (event) => {
-      spawnFloatingHit(event.payload);
       addHitToTicker(event.payload);
     });
 
@@ -304,7 +283,6 @@ function mockSimulationHit() {
 
   mockStats.elemental_breakdown[elem] = (mockStats.elemental_breakdown[elem] || 0) + value;
 
-  spawnFloatingHit(event);
   addHitToTicker(event);
   updateCombatStats(mockStats);
 }

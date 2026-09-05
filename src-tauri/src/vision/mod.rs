@@ -81,27 +81,45 @@ mod tests {
     }
 
     #[test]
-    fn test_recognize_frame_040_damage_9608() {
-        let frame = match load_sample_frame(40) {
-            Some(f) => f,
-            None => { println!("sample frame 40 missing, skipping"); return; }
+    fn test_diagnose_user_problem_frame() {
+        let path = std::path::Path::new("../sample_video/user_problem_frame.png");
+        if !path.exists() {
+            println!("user_problem_frame.png missing");
+            return;
+        }
+
+        let img = image::open(path).unwrap().to_rgba8();
+        let (width, height) = (img.width(), img.height());
+        let mut bgra_raw = img.into_raw();
+        for chunk in bgra_raw.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+
+        let raw = RawFrame {
+            width,
+            height,
+            stride: (width * 4) as usize,
+            data: bgra_raw,
+            screen_x: 0,
+            screen_y: 0,
         };
 
-        let comps = ColorFilter::segment_frame(&frame);
+        let comps = ColorFilter::segment_frame(&raw);
         let clusters = ColorFilter::cluster_components(comps);
         let matcher = DigitMatcher::new();
 
-        let mut found_9608 = false;
-        for cl in &clusters {
-            if let Some(hit) = matcher.recognize_cluster(cl) {
-                println!("F40 Detected: {} ({:?}, crit={}, conf={:.2}) at ({}, {})",
-                    hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y);
-                if hit.value == 9608 && cl.element == crate::state::ElementType::Geo {
-                    found_9608 = true;
-                }
+        println!("\n=== user_problem_frame.png size: {}x{} ===", width, height);
+        let mut false_positives = 0;
+        for (ci, cl) in clusters.iter().enumerate() {
+            let res = matcher.recognize_cluster(cl);
+            if let Some(hit) = res {
+                false_positives += 1;
+                let box_strs: Vec<_> = cl.glyphs.iter().map(|g| format!("({},{} {}x{})", g.bbox.x, g.bbox.y, g.bbox.width, g.bbox.height)).collect();
+                println!("  Cluster #{}: elem={:?}, VALUE={}, conf={:.2}, crit={}, at ({},{}), glyphs: {}",
+                    ci, cl.element, hit.value, hit.confidence, hit.is_crit, hit.x, hit.y, box_strs.join(" "));
             }
         }
-        assert!(found_9608, "Failed to recognize Geo 9608 in frame 40!");
+        assert_eq!(false_positives, 0, "Expected 0 false positives in user_problem_frame.png, but found {}", false_positives);
     }
 
     #[test]
@@ -120,8 +138,9 @@ mod tests {
 
         for cl in &clusters {
             if let Some(hit) = matcher.recognize_cluster(cl) {
-                println!("F35 Detected: {} ({:?}, crit={}, conf={:.2}) at ({}, {})",
-                    hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y);
+                let box_strs: Vec<_> = cl.glyphs.iter().map(|g| format!("({},{} {}x{})", g.bbox.x, g.bbox.y, g.bbox.width, g.bbox.height)).collect();
+                println!("F35 Detected: {} ({:?}, crit={}, conf={:.2}) at ({}, {}), glyphs: {}",
+                    hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y, box_strs.join(" "));
                 if hit.value == 4046 {
                     found_4046 = true;
                 }
@@ -174,8 +193,9 @@ mod tests {
         let mut found_1141 = false;
         for cl in &clusters {
             if let Some(hit) = matcher.recognize_cluster(cl) {
-                println!("F42 Detected: {} ({:?}, crit={}, conf={:.2}) at ({}, {})",
-                    hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y);
+                let box_strs: Vec<_> = cl.glyphs.iter().map(|g| format!("({},{} {}x{})", g.bbox.x, g.bbox.y, g.bbox.width, g.bbox.height)).collect();
+                println!("F42 Detected: {} ({:?}, crit={}, conf={:.2}) at ({}, {}), glyphs: {}",
+                    hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y, box_strs.join(" "));
                 if hit.value == 1141 {
                     found_1141 = true;
                 }

@@ -282,6 +282,33 @@ pub const DIGIT_9: [u8; 384] = [
     0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,0,
 ];
 
+pub const DIGIT_4_CRIT: [u8; 384] = [
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,1,1,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,1,1,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,1,1,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,1,1,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,1,1,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,1,1,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,1,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,1,1,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,1,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,
+    0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,
+];
+
 pub const DIGIT_4_LOW_BAR: [u8; 384] = [
     0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,
@@ -311,13 +338,14 @@ pub const DIGIT_4_LOW_BAR: [u8; 384] = [
 
 pub struct DigitTemplates {
     pub templates: [[u8; 384]; 10],
-    pub alt_templates: [Option<[u8; 384]>; 10],
+    pub alt_templates: [Vec<[u8; 384]>; 10],
 }
 
 impl DigitTemplates {
     pub fn new() -> Self {
-        let mut alt_templates = [None; 10];
-        alt_templates[4] = Some(DIGIT_4_LOW_BAR);
+        let mut alt_templates: [Vec<[u8; 384]>; 10] = Default::default();
+        alt_templates[4].push(DIGIT_4_CRIT);
+        alt_templates[4].push(DIGIT_4_LOW_BAR);
 
         Self {
             templates: [
@@ -352,22 +380,23 @@ impl DigitTemplates {
         for (digit, t) in self.templates.iter().enumerate() {
             let mut score = Self::calc_iou(&normalized, t);
 
-            if let Some(alt) = &self.alt_templates[digit] {
+            for alt in &self.alt_templates[digit] {
                 let alt_score = Self::calc_iou(&normalized, alt);
                 score = score.max(alt_score);
             }
 
+            let raw_score = score;
             // Aspect ratio bonus / penalty
             // Digit 1 in Genshin is very narrow (aspect 0.25 to 0.45)
             if digit == 1 {
-                if aspect <= 0.45 {
+                if aspect <= 0.45 && raw_score >= 0.28 {
                     score += 0.20;
-                } else if aspect >= 0.58 {
+                } else if aspect >= 0.55 {
                     score -= 0.35;
                 }
             } else {
-                if aspect <= 0.40 {
-                    score -= 0.25;
+                if aspect <= 0.38 {
+                    score -= 0.30;
                 }
             }
 
@@ -508,7 +537,7 @@ impl DigitMatcher {
                 if sub_glyphs.len() >= 2 {
                     for (crop, cw, ch) in sub_glyphs {
                         let (digit, conf) = self.templates.match_glyph(&crop, cw, ch);
-                        if conf >= 0.38 {
+                        if conf >= 0.50 {
                             recognized_digits.push(digit);
                             total_conf += conf;
                         }
@@ -518,13 +547,20 @@ impl DigitMatcher {
             }
 
             let (digit, conf) = self.templates.match_glyph(&g.mask, gw, gh);
-            if conf >= 0.38 {
+            if conf >= 0.50 {
                 recognized_digits.push(digit);
                 total_conf += conf;
             }
         }
 
-        if recognized_digits.len() < 2 {
+        // In a real damage number, all non-crit glyphs must be recognized as digits
+        let expected_digits = cluster.glyphs.len().saturating_sub(if has_crit_mark { 1 } else { 0 });
+        if recognized_digits.len() < expected_digits || recognized_digits.len() < 2 {
+            return None;
+        }
+
+        let avg_conf = total_conf / recognized_digits.len() as f32;
+        if avg_conf < 0.65 {
             return None;
         }
 
@@ -538,7 +574,6 @@ impl DigitMatcher {
             return None;
         }
 
-        let avg_conf = total_conf / recognized_digits.len() as f32;
         let is_crit = has_crit_mark || cluster.bbox.height >= 27;
 
         Some(RecognizedHit {

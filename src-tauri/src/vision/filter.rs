@@ -133,10 +133,10 @@ impl ColorFilter {
         let data = &frame.data;
 
         // Skip borders (Genshin damage numbers appear in the central combat area)
-        let y_min = (h as f32 * 0.15) as usize;
-        let y_max = (h as f32 * 0.85) as usize;
-        let x_min = (w as f32 * 0.15) as usize;
-        let x_max = (w as f32 * 0.85) as usize;
+        let y_min = (h as f32 * 0.21) as usize; // Exclude top domain banner / header / quest objectives
+        let y_max = (h as f32 * 0.85) as usize; // Exclude bottom HP / burst bar
+        let x_min = (w as f32 * 0.12) as usize;
+        let x_max = (w as f32 * 0.88) as usize;
 
         // Grid-based sampling for performance (stride 2x2 coarse pass)
         let mut visited = vec![false; w * h];
@@ -144,7 +144,21 @@ impl ColorFilter {
 
         for y in (y_min..y_max).step_by(2) {
             let row_offset = y * stride;
+            let yf = y as f32 / h as f32;
+
             for x in (x_min..x_max).step_by(2) {
+                let xf = x as f32 / w as f32;
+
+                // Left quest & item drop exclusion zone (Mora drops, quest text)
+                if xf < 0.28 && yf >= 0.22 && yf <= 0.72 {
+                    continue;
+                }
+
+                // Right party list exclusion zone (characters, portraits, keybinds)
+                if xf > 0.82 && yf >= 0.15 && yf <= 0.70 {
+                    continue;
+                }
+
                 let idx = y * w + x;
                 if visited[idx] {
                     continue;
@@ -171,6 +185,61 @@ impl ColorFilter {
         }
 
         components
+    }
+
+    /// Verify that a candidate component has a dark outline / drop shadow
+    /// against its background. Essential for Physical (white) text to reject bright snow/floors/UI.
+    fn has_dark_outline(frame: &RawFrame, min_x: usize, max_x: usize, min_y: usize, max_y: usize) -> bool {
+        let w = frame.width as usize;
+        let h = frame.height as usize;
+        let stride = frame.stride;
+        let data = &frame.data;
+
+        let mut dark_count = 0usize;
+        let mut sample_count = 0usize;
+
+        // Sample 1 pixel outside the bounding box
+        let y_top = min_y.saturating_sub(1);
+        let y_bot = (max_y + 1).min(h.saturating_sub(1));
+
+        for x in (min_x..=max_x).step_by(2) {
+            if x < w {
+                for y in [y_top, y_bot] {
+                    let off = y * stride + x * 4;
+                    if off + 3 < data.len() {
+                        let (_, _, v) = rgb_to_hsv(data[off + 2], data[off + 1], data[off]);
+                        if v <= 48 {
+                            dark_count += 1;
+                        }
+                        sample_count += 1;
+                    }
+                }
+            }
+        }
+
+        let x_left = min_x.saturating_sub(1);
+        let x_right = (max_x + 1).min(w.saturating_sub(1));
+
+        for y in (min_y..=max_y).step_by(2) {
+            if y < h {
+                for x in [x_left, x_right] {
+                    let off = y * stride + x * 4;
+                    if off + 3 < data.len() {
+                        let (_, _, v) = rgb_to_hsv(data[off + 2], data[off + 1], data[off]);
+                        if v <= 48 {
+                            dark_count += 1;
+                        }
+                        sample_count += 1;
+                    }
+                }
+            }
+        }
+
+        if sample_count == 0 {
+            return false;
+        }
+
+        (dark_count as f32 / sample_count as f32) >= 0.18
     }
 
     fn extract_component(
@@ -240,20 +309,32 @@ impl ColorFilter {
         let comp_w = (max_x - min_x + 1) as u32;
         let comp_h = (max_y - min_y + 1) as u32;
 
-        // Height filter for Genshin digit scale: typical numbers are 12px to 75px tall
-        if comp_h < 12 || comp_h > 80 {
+        // Exclude components whose vertical position extends into top/bottom UI zones
+        if (min_y as f32) < (h as f32 * 0.20) || (max_y as f32) > (h as f32 * 0.85) {
+            return None;
+        }
+
+        // Height filter for Genshin digit scale: typical numbers are 15px to 80px tall
+        if comp_h < 15 || comp_h > 80 {
             return None;
         }
 
         // Aspect ratio filter: single digits or multi-digit clumps
         let aspect = comp_w as f32 / comp_h as f32;
-        if aspect < 0.2 || aspect > 6.0 {
+        if aspect < 0.20 || aspect > 4.5 {
             return None;
         }
 
-        // Minimum pixel density
-        if count < 18 {
+        // Minimum pixel density (thin digit 1 can have ~14 pixels)
+        if count < 14 {
             return None;
+        }
+
+        // Physical damage numbers must have a dark outline to reject white snow/floor/dialogues
+        if target_elem == ElementType::Physical {
+            if !Self::has_dark_outline(frame, min_x, max_x, min_y, max_y) {
+                return None;
+            }
         }
 
         // Build binary mask for template matching
@@ -323,7 +404,7 @@ impl ColorFilter {
 
         for c in sorted {
             // Noise rejection: Genshin damage digits have reasonable height and density
-            if c.bbox.height < 12 || c.bbox.height > 85 || c.bbox.width < 4 || c.pixel_count < 16 {
+            if c.bbox.height < 16 || c.bbox.height > 85 || c.bbox.width < 5 || c.pixel_count < 20 {
                 continue;
             }
 
