@@ -1,21 +1,22 @@
 pub mod filter;
 pub mod matcher;
+pub mod ml_matcher;
 pub mod tracker;
 
 use crate::capture::RawFrame;
 use filter::ColorFilter;
-use matcher::DigitMatcher;
+use ml_matcher::MlMatcher;
 use tracker::{ConfirmedHit, HitTracker};
 
 pub struct VisionEngine {
-    matcher: DigitMatcher,
+    matcher: MlMatcher,
     tracker: HitTracker,
 }
 
 impl VisionEngine {
     pub fn new() -> Self {
         Self {
-            matcher: DigitMatcher::new(),
+            matcher: MlMatcher::new().expect("Failed to initialize ML Matcher"),
             tracker: HitTracker::new(),
         }
     }
@@ -106,7 +107,7 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&raw);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = DigitMatcher::new();
+        let matcher = MlMatcher::new().unwrap();
 
         println!("\n=== user_problem_frame.png size: {}x{} ===", width, height);
         let mut false_positives = 0;
@@ -124,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_diagnose_issue_video_frames() {
-        let matcher = DigitMatcher::new();
+        let matcher = MlMatcher::new().unwrap();
         let mut total_false_hits = 0;
         for sec in 1..=12 {
             let p = format!("../sample_video/issue_sec_{:02}.png", sec);
@@ -177,16 +178,27 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&frame);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = DigitMatcher::new();
+        let matcher = MlMatcher::new().unwrap();
 
         let mut found_4046 = false;
         let mut found_14229 = false;
 
         for cl in &clusters {
             if let Some(hit) = matcher.recognize_cluster(cl) {
-                let box_strs: Vec<_> = cl.glyphs.iter().map(|g| format!("({},{} {}x{})", g.bbox.x, g.bbox.y, g.bbox.width, g.bbox.height)).collect();
+                let mut glyph_details = Vec::new();
+                for g in &cl.glyphs {
+                    let ratio = ColorFilter::dark_outline_ratio(
+                        &frame,
+                        g.bbox.x as usize,
+                        (g.bbox.x + g.bbox.width - 1) as usize,
+                        g.bbox.y as usize,
+                        (g.bbox.y + g.bbox.height - 1) as usize,
+                    );
+                    let asp = g.bbox.width as f32 / g.bbox.height as f32;
+                    glyph_details.push(format!("({},{} {}x{}, asp={:.2}, dark={:.2})", g.bbox.x, g.bbox.y, g.bbox.width, g.bbox.height, asp, ratio));
+                }
                 println!("F35 Detected: {} ({:?}, crit={}, conf={:.2}) at ({}, {}), glyphs: {}",
-                    hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y, box_strs.join(" "));
+                    hit.value, cl.element, hit.is_crit, hit.confidence, hit.x, hit.y, glyph_details.join(" "));
                 if hit.value == 4046 {
                     found_4046 = true;
                 }
@@ -208,7 +220,7 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&frame);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = DigitMatcher::new();
+        let matcher = MlMatcher::new().unwrap();
 
         let mut found_32625 = false;
         for cl in &clusters {
@@ -232,7 +244,7 @@ mod tests {
 
         let comps = ColorFilter::segment_frame(&frame);
         let clusters = ColorFilter::cluster_components(comps);
-        let matcher = DigitMatcher::new();
+        let matcher = MlMatcher::new().unwrap();
 
 
 
@@ -269,6 +281,82 @@ mod tests {
 
         println!("End-to-end simulation produced {} confirmed hits across frames 30-45", total_confirmed);
         assert!(total_confirmed > 0, "Expected at least 1 confirmed hit over frames 30-45");
+    }
+
+    #[test]
+    fn test_diagnose_roam_frames() {
+        let mut engine = VisionEngine::new();
+        let matcher = MlMatcher::new().unwrap();
+        let mut total_raw_hits = 0;
+        let mut total_confirmed = 0;
+
+        for frame_idx in 1..=43 {
+            let p = format!("../sample_video/roam_frames/frame_{:03}.png", frame_idx);
+            let path = std::path::Path::new(&p);
+            if !path.exists() {
+                continue;
+            }
+            let img = match image::open(path) {
+                Ok(im) => im.to_rgba8(),
+                Err(_) => continue,
+            };
+            let (width, height) = (img.width(), img.height());
+            let mut bgra_raw = img.into_raw();
+            for chunk in bgra_raw.chunks_exact_mut(4) {
+                chunk.swap(0, 2);
+            }
+            let raw = RawFrame {
+                width,
+                height,
+                stride: (width * 4) as usize,
+                data: bgra_raw,
+                screen_x: 0,
+                screen_y: 0,
+            };
+
+            // 1. Raw cluster recognitions
+            let comps = ColorFilter::segment_frame(&raw);
+            let clusters = ColorFilter::cluster_components(comps);
+            let mut frame_raw = Vec::new();
+            for cl in &clusters {
+                if let Some(hit) = matcher.recognize_cluster(cl) {
+                    let mut glyph_details = Vec::new();
+                    for g in &cl.glyphs {
+                        let ratio = ColorFilter::dark_outline_ratio(
+                            &raw,
+                            g.bbox.x as usize,
+                            (g.bbox.x + g.bbox.width - 1) as usize,
+                            g.bbox.y as usize,
+                            (g.bbox.y + g.bbox.height - 1) as usize,
+                        );
+                        let asp = g.bbox.width as f32 / g.bbox.height as f32;
+                        glyph_details.push(format!("({},{} {}x{}, asp={:.2}, dark={:.2})", g.bbox.x, g.bbox.y, g.bbox.width, g.bbox.height, asp, ratio));
+                    }
+                    frame_raw.push((hit.value, cl.element, hit.confidence, hit.x, hit.y, glyph_details.join(" ")));
+                }
+            }
+
+            if !frame_raw.is_empty() {
+                println!("Roam Frame {:03} RAW DETECTIONS ({}):", frame_idx, frame_raw.len());
+                for (v, el, conf, x, y, bboxes) in &frame_raw {
+                    println!("   [RAW] val={}, elem={:?}, conf={:.2} at ({},{}) | glyphs: {}", v, el, conf, x, y, bboxes);
+                }
+            }
+            total_raw_hits += frame_raw.len();
+
+            // 2. Confirmed hits through HitTracker
+            let confirmed = engine.process_frame(&raw);
+            for hit in &confirmed {
+                println!("   >>> [CONFIRMED HIT] Frame {:03}: val={}, elem={:?}, crit={}, at ({},{})",
+                    frame_idx, hit.value, hit.element, hit.is_crit, hit.x, hit.y);
+            }
+            total_confirmed += confirmed.len();
+        }
+
+        println!("\n=== ROAM SUMMARY ===");
+        println!("Total Raw Hits: {}", total_raw_hits);
+        println!("Total Confirmed Hits: {}", total_confirmed);
+        assert_eq!(total_confirmed, 0, "Expected 0 confirmed hits while roaming, but found {}", total_confirmed);
     }
 }
 

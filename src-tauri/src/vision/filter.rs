@@ -187,9 +187,8 @@ impl ColorFilter {
         components
     }
 
-    /// Verify that a candidate component has a dark outline / drop shadow
-    /// against its background. Essential for Physical (white) text to reject bright snow/floors/UI.
-    fn has_dark_outline(frame: &RawFrame, min_x: usize, max_x: usize, min_y: usize, max_y: usize) -> bool {
+    /// Calculate ratio of dark pixels immediately surrounding a bounding box
+    pub fn dark_outline_ratio(frame: &RawFrame, min_x: usize, max_x: usize, min_y: usize, max_y: usize) -> f32 {
         let w = frame.width as usize;
         let h = frame.height as usize;
         let stride = frame.stride;
@@ -236,10 +235,15 @@ impl ColorFilter {
         }
 
         if sample_count == 0 {
-            return false;
+            return 0.0;
         }
 
-        (dark_count as f32 / sample_count as f32) >= 0.18
+        dark_count as f32 / sample_count as f32
+    }
+
+    /// Verify that a candidate component has a dark outline / drop shadow
+    pub fn has_dark_outline(frame: &RawFrame, min_x: usize, max_x: usize, min_y: usize, max_y: usize) -> bool {
+        Self::dark_outline_ratio(frame, min_x, max_x, min_y, max_y) >= 0.18
     }
 
     fn extract_component(
@@ -314,8 +318,9 @@ impl ColorFilter {
             return None;
         }
 
-        // Height filter for Genshin digit scale: numbers are 15px to max 52px tall at 720p (~70px at 1080p)
-        let max_glyph_h = (h as f32 * 0.065).max(52.0) as u32;
+        // Height filter for Genshin digit scale: numbers are 15px to max 40px tall at 720p (~55px at 1080p)
+        // Real crit digits are ~30-32px; environmental false positives often reach 36-49px
+        let max_glyph_h = (h as f32 * 0.055).max(40.0) as u32;
         if comp_h < 15 || comp_h > max_glyph_h {
             return None;
         }
@@ -405,7 +410,7 @@ impl ColorFilter {
 
         for c in sorted {
             // Noise rejection: Genshin damage digits have reasonable height and density
-            if c.bbox.height < 15 || c.bbox.height > 52 || c.bbox.width < 5 || c.pixel_count < 14 {
+            if c.bbox.height < 15 || c.bbox.height > 40 || c.bbox.width < 5 || c.pixel_count < 14 {
                 continue;
             }
 

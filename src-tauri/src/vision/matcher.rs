@@ -363,6 +363,10 @@ impl DigitTemplates {
         }
 
         let aspect = cw as f32 / ch as f32;
+        // Individual digits in Genshin never exceed aspect 0.88 or have aspect < 0.20
+        if aspect < 0.20 || aspect > 0.88 {
+            return (0, 0.0);
+        }
 
         // Resample crop to 16x24
         let mut normalized = [0u8; TEMPLATE_W * TEMPLATE_H];
@@ -386,13 +390,39 @@ impl DigitTemplates {
             }
 
             let raw_score = score;
-            // Aspect ratio bonus / penalty
-            // Digit 1 in Genshin is very narrow (aspect 0.25 to 0.45)
+
             if digit == 1 {
-                if aspect <= 0.45 && raw_score >= 0.28 {
+                // Digit 1 in Genshin is narrow (aspect 0.22 to 0.48)
+                if aspect <= 0.48 && raw_score >= 0.28 {
                     score += 0.20;
-                } else if aspect >= 0.55 {
+                } else if aspect >= 0.52 {
                     score -= 0.35;
+                }
+            } else if digit == 8 {
+                // Digit 8 must have inner holes / voids (upper loop and lower loop)
+                // In a solid blob or cloud, both hole areas are solid 1s
+                let mut upper_hole_ones = 0;
+                for ty in 5..8 {
+                    for tx in 7..10 {
+                        if normalized[ty * TEMPLATE_W + tx] == 1 {
+                            upper_hole_ones += 1;
+                        }
+                    }
+                }
+                let mut lower_hole_ones = 0;
+                for ty in 17..21 {
+                    for tx in 7..10 {
+                        if normalized[ty * TEMPLATE_W + tx] == 1 {
+                            lower_hole_ones += 1;
+                        }
+                    }
+                }
+                // Upper hole has 9 pixels, lower hole has 16 pixels
+                if upper_hole_ones >= 6 || lower_hole_ones >= 10 {
+                    score -= 0.40;
+                }
+                if aspect <= 0.38 {
+                    score -= 0.30;
                 }
             } else {
                 if aspect <= 0.38 {
@@ -532,10 +562,14 @@ impl DigitMatcher {
             }
 
             // Touching glyphs split
-            if aspect >= 1.25 && gw >= 26 {
+            if aspect >= 1.05 && gw >= 20 {
                 let sub_glyphs = self.split_touching_glyphs(&g.mask, gw, gh);
                 if sub_glyphs.len() >= 2 {
                     for (crop, cw, ch) in sub_glyphs {
+                        let sub_asp = cw as f32 / ch as f32;
+                        if sub_asp < 0.20 || sub_asp > 0.88 {
+                            continue;
+                        }
                         let (digit, conf) = self.templates.match_glyph(&crop, cw, ch);
                         if conf >= 0.50 {
                             recognized_digits.push(digit);
@@ -544,6 +578,11 @@ impl DigitMatcher {
                     }
                     continue;
                 }
+            }
+
+            // An unsplit single digit in Genshin never exceeds aspect 0.88
+            if aspect > 0.88 {
+                continue;
             }
 
             let (digit, conf) = self.templates.match_glyph(&g.mask, gw, gh);
@@ -561,6 +600,14 @@ impl DigitMatcher {
 
         let avg_conf = total_conf / recognized_digits.len() as f32;
         if avg_conf < 0.65 {
+            return None;
+        }
+
+        // All-ones rejection: "11", "111", "1111" etc. are the most common false positive
+        // pattern from vertical environmental features (tree trunks, pillars, edges).
+        // Real all-1 damage numbers are extremely rare and would have higher confidence.
+        let all_ones = recognized_digits.iter().all(|&d| d == 1);
+        if all_ones && avg_conf < 0.82 {
             return None;
         }
 

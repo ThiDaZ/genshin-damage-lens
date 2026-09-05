@@ -82,13 +82,16 @@ impl HitTracker {
                 track.frames_seen += 1;
                 track.frames_missing = 0;
 
-                // Detect static UI elements: if seen across 5+ frames with zero vertical displacement
-                if track.frames_seen >= 5 && (track.initial_y - track.y).abs() < 1.0 {
+                let dy_up = track.initial_y - track.y;
+
+                // Detect static UI elements or environmental scenery: if seen across 3+ frames with negligible upward drift
+                if track.frames_seen >= 3 && dy_up < 1.0 {
                     track.is_static = true;
                 }
 
-                // Emit once the number has been confirmed over 2 frames to avoid OCR flicker
-                if track.frames_seen >= 2 && !track.emitted && !track.is_static {
+                // In Genshin Impact, genuine damage numbers float upward as they animate.
+                // We require 2 frames and >= 2.0px upward drift.
+                if track.frames_seen >= 2 && !track.emitted && !track.is_static && dy_up >= 2.0 {
                     track.emitted = true;
                     confirmed.push(ConfirmedHit {
                         value: track.peak_value,
@@ -129,10 +132,15 @@ impl HitTracker {
         // Append new tracks
         self.active_tracks.extend(new_tracks);
 
-        // Flush un-emitted tracks that have at least 2 reliable observations before purging
+        // Flush un-emitted tracks that have at least 2 reliable observations before purging.
         self.active_tracks.retain_mut(|track| {
             if track.frames_missing > 4 {
-                if !track.emitted && track.frames_seen >= 2 && !track.is_static && track.peak_value >= 100 {
+                let dy_up = track.initial_y - track.y;
+                let can_flush = !track.emitted && !track.is_static && (
+                    // Standard flush
+                    (track.frames_seen >= 2 && dy_up >= 2.0)
+                );
+                if can_flush {
                     track.emitted = true;
                     confirmed.push(ConfirmedHit {
                         value: track.peak_value,
