@@ -165,12 +165,18 @@ async function setupEventListeners() {
     await listen("combat-stats", (event) => {
       updateCombatStats(event.payload);
     });
+
+    // Listen to global clickthrough toggle (from backend F8 hotkey when unfocused)
+    await listen("clickthrough-toggled", (event) => {
+      isPassthrough = Boolean(event.payload);
+      applyClickthroughUI(isPassthrough);
+    });
   }
 
   // Toggle Click-Through mode
   btnClickthrough.addEventListener("click", toggleClickthrough);
 
-  // Global F8 shortcut for toggling clickthrough
+  // Fallback local keydown listener when overlay happens to have focus
   window.addEventListener("keydown", (e) => {
     if (e.key === "F8") {
       toggleClickthrough();
@@ -227,11 +233,8 @@ async function setupEventListeners() {
   });
 }
 
-// Toggle Passthrough
-async function toggleClickthrough() {
-  isPassthrough = !isPassthrough;
-
-  if (isPassthrough) {
+function applyClickthroughUI(passthrough) {
+  if (passthrough) {
     btnClickthrough.classList.add("passthrough");
     modeIcon.textContent = "🛡️";
     modeLabel.textContent = "Passthrough (F8)";
@@ -240,6 +243,12 @@ async function toggleClickthrough() {
     modeIcon.textContent = "🖱️";
     modeLabel.textContent = "Interactive";
   }
+}
+
+// Toggle Passthrough
+async function toggleClickthrough() {
+  isPassthrough = !isPassthrough;
+  applyClickthroughUI(isPassthrough);
 
   if (invoke) {
     try {

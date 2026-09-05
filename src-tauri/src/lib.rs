@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use vision::VisionEngine;
 
+#[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F8};
+
 #[tauri::command]
 fn get_combat_stats(state: State<'_, SharedState>) -> CombatStats {
     state.lock().compute_stats()
@@ -26,12 +29,18 @@ fn reset_stats(state: State<'_, SharedState>, app_handle: AppHandle) -> CombatSt
 }
 
 #[tauri::command]
-fn toggle_click_through(window: Window, ignore: bool, state: State<'_, SharedState>) -> Result<bool, String> {
+fn toggle_click_through(
+    window: Window,
+    ignore: bool,
+    state: State<'_, SharedState>,
+    app_handle: AppHandle,
+) -> Result<bool, String> {
     window
         .set_ignore_cursor_events(ignore)
         .map_err(|e| e.to_string())?;
 
     state.lock().click_through = ignore;
+    let _ = app_handle.emit("clickthrough-toggled", ignore);
     Ok(ignore)
 }
 
@@ -139,9 +148,27 @@ pub fn run() {
                 let mut capture = ScreenCapture::new();
                 let mut vision = VisionEngine::new();
                 let mut last_stats_emit = Instant::now();
+                #[cfg(windows)]
+                let mut f8_was_down = false;
 
                 while running_clone.load(Ordering::Relaxed) {
                     let loop_start = Instant::now();
+
+                    // Global F8 Hotkey check (works even when overlay or game is unfocused)
+                    #[cfg(windows)]
+                    {
+                        let f8_down = unsafe { (GetAsyncKeyState(VK_F8.0 as i32) as u16 & 0x8000) != 0 };
+                        if f8_down && !f8_was_down {
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let mut s = state_clone.lock();
+                                let new_state = !s.click_through;
+                                s.click_through = new_state;
+                                let _ = window.set_ignore_cursor_events(new_state);
+                                let _ = app_handle.emit("clickthrough-toggled", new_state);
+                            }
+                        }
+                        f8_was_down = f8_down;
+                    }
 
                     let is_active = state_clone.lock().capture_active;
                     if is_active {
