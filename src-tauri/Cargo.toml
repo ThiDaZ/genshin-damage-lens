@@ -1,0 +1,34 @@
+[package]
+name = "genshin-damage-lens"
+version = "0.1.0"
+description = "High-Performance External Genshin Impact Damage Tracker & Overlay"
+authors = ["ThiDaZ"]
+edition = "2021"
+
+[lib]
+name = "genshin_damage_lens_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+]
+

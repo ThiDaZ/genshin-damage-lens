@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GenshinDamageLens HUD Overlay</title>
+    <!-- Google Fonts: Outfit & Orbitron for game HUD styling -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Outfit:wght@300;400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body class="overlay-body">
+    <!-- Top HUD Toolbar (Always reachable, toggleable) -->
+    <header class="hud-header" id="hud-header">
+      <div class="hud-brand">
+        <div class="hud-pulse-dot" id="engine-status-dot"></div>
+        <span class="hud-title">GENSHIN DAMAGE LENS</span>
+        <span class="hud-badge" id="capture-badge">DXGI 60FPS</span>
+      </div>
+
+      <div class="hud-controls">
+        <button
+          class="hud-btn hud-btn-mode"
+          id="btn-clickthrough"
+          title="Toggle Passthrough (HotKey: F8)"
+        >
+          <span class="btn-icon" id="mode-icon">🖱️</span>
+          <span id="mode-label">Interactive</span>
+        </button>
+
+        <button
+          class="hud-btn hud-btn-sim"
+          id="btn-simulate"
+          title="Trigger a test damage hit"
+        >
+          <span>⚡ Test Hit</span>
+        </button>
+
+        <button
+          class="hud-btn hud-btn-auto-sim"
+          id="btn-auto-sim"
+          title="Toggle automatic combat simulation"
+        >
+          <span>🔄 Demo Loop</span>
+        </button>
+
+        <button
+          class="hud-btn hud-btn-reset"
+          id="btn-reset"
+          title="Reset combat session stats"
+        >
+          <span>🗑️ Reset</span>
+        </button>
+
+        <button
+          class="hud-btn hud-btn-collapse"
+          id="btn-collapse"
+          title="Minimize HUD"
+        >
+          <span id="collapse-icon">➖</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Floating HUD Widget -->
+    <main class="hud-container" id="hud-container">
+      <!-- Section 1: Rolling DPS Meter -->
+      <section class="hud-card dps-card">
+        <div class="card-header">
+          <span class="card-label">CURRENT DPS</span>
+          <span class="card-sub">5s Rolling Window</span>
+        </div>
+        <div class="dps-value-container">
+          <span class="dps-number" id="dps-display">0</span>
+          <span class="dps-unit">DPS</span>
+        </div>
+        <div class="dps-meter-bar">
+          <div class="dps-meter-fill" id="dps-fill"></div>
+        </div>
+      </section>
+
+      <!-- Section 2: Peak Critical Hit Trophy -->
+      <section class="hud-card peak-card" id="peak-card">
+        <div class="card-header">
+          <span class="card-label">SESSION PEAK HIT</span>
+          <span class="card-badge peak-element" id="peak-element-badge">PHYSICAL</span>
+        </div>
+        <div class="peak-value-wrapper">
+          <span class="peak-icon">💥</span>
+          <span class="peak-number" id="peak-display">0</span>
+        </div>
+        <div class="peak-meta" id="peak-meta-text">No combat data yet</div>
+      </section>
+
+      <!-- Section 3: Session Stats & Elemental Breakdown -->
+      <section class="hud-card stats-card">
+        <div class="card-header">
+          <span class="card-label">SESSION STATISTICS</span>
+          <span class="stat-crit-rate" id="crit-rate-display">CRIT 0.0%</span>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-title">TOTAL DAMAGE</span>
+            <span class="stat-val" id="total-damage-display">0</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-title">RECORDED HITS</span>
+            <span class="stat-val" id="total-hits-display">0</span>
+          </div>
+        </div>
+
+        <!-- Elemental Stacked Distribution Bar -->
+        <div class="elemental-bar-container">
+          <div class="elemental-bar-title">ELEMENTAL DISTRIBUTION</div>
+          <div class="elemental-stacked-bar" id="elemental-bar">
+            <!-- Dynamic elemental segments rendered by main.js -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Section 4: Live Hit Ticker (Last 5 hits) -->
+      <section class="hud-card ticker-card">
+        <div class="card-header">
+          <span class="card-label">COMBAT FEED</span>
+          <span class="card-sub" id="feed-count">0 hits</span>
+        </div>
+        <div class="hit-ticker-list" id="hit-ticker-list">
+          <div class="empty-feed-hint">Waiting for combat damage...</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Floating In-Game Simulation Canvas Area (Displays floating numbers over screen) -->
+    <div class="floating-damage-layer" id="damage-layer"></div>
+  </body>
+</html>
