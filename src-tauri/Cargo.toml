@@ -34,7 +34,13 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
 ]
 
+# Live pixel processing must be optimized too: pnpm run dev uses this profile.
+[profile.dev]
+opt-level = 3
+
 [profile.dev.package."*"]
 opt-level = 3
 
-
+# Pixel-heavy replay tests should measure the algorithm rather than debug loop overhead.
+[profile.test]
+opt-level = 2
