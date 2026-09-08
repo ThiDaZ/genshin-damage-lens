@@ -150,6 +150,15 @@ async function setupEventListeners() {
       isPassthrough = Boolean(event.payload);
       applyClickthroughUI(isPassthrough);
     });
+
+    await listen("capture-status", (event) => {
+      const status = event.payload;
+      const badge = document.getElementById("capture-badge");
+      const dot = document.getElementById("engine-status-dot");
+      badge.textContent = status === "tracking" ? "TRACKING" : status === "paused" ? "PAUSED" : "WAITING FOR GAME";
+      dot.style.background = status === "tracking" ? "#10b981" : "#f59e0b";
+      dot.style.animationPlayState = status === "tracking" ? "running" : "paused";
+    });
   }
 
   // Toggle Click-Through mode
@@ -235,6 +244,8 @@ async function toggleClickthrough() {
     try {
       await invoke("toggle_click_through", { ignore: isPassthrough });
     } catch (err) {
+      isPassthrough = !isPassthrough;
+      applyClickthroughUI(isPassthrough);
       console.warn("Could not set click-through:", err);
     }
   }
@@ -305,7 +316,8 @@ function mockReset() {
 
 // Initialize on Load
 window.addEventListener("DOMContentLoaded", async () => {
-  setupEventListeners();
+  await setupEventListeners();
+  if (!invoke) document.getElementById("capture-badge").textContent = "DEMO PREVIEW";
 
   // Initial fetch from backend
   if (invoke) {
