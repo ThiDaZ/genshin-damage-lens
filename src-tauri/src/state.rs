@@ -1,8 +1,8 @@
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -72,6 +72,8 @@ pub struct AppState {
     pub elemental_breakdown: HashMap<ElementType, u64>,
     pub capture_active: bool,
     pub click_through: bool,
+    /// Invalidates pending vision work across session resets and capture changes.
+    pub vision_generation: u64,
 }
 
 impl AppState {
@@ -86,11 +88,19 @@ impl AppState {
             peak_element: ElementType::Physical,
             elemental_breakdown: HashMap::new(),
             capture_active: true,
-            click_through: true,
+            click_through: false,
+            vision_generation: 0,
         }
     }
 
-    pub fn record_hit(&mut self, value: u32, element: ElementType, is_crit: bool, x: i32, y: i32) -> DamageEvent {
+    pub fn record_hit(
+        &mut self,
+        value: u32,
+        element: ElementType,
+        is_crit: bool,
+        x: i32,
+        y: i32,
+    ) -> DamageEvent {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -144,7 +154,9 @@ impl AppState {
     pub fn compute_stats(&self) -> CombatStats {
         let now = Instant::now();
         let window_secs = 5.0f32;
-        let dps_cutoff = now.checked_sub(Duration::from_secs_f32(window_secs)).unwrap_or(now);
+        let dps_cutoff = now
+            .checked_sub(Duration::from_secs_f32(window_secs))
+            .unwrap_or(now);
 
         let mut window_damage = 0u64;
         for record in self.hit_history.iter().rev() {
@@ -185,6 +197,7 @@ impl AppState {
     }
 
     pub fn reset(&mut self) {
+        self.vision_generation = self.vision_generation.wrapping_add(1);
         self.hit_history.clear();
         self.total_damage = 0;
         self.total_hits = 0;
@@ -193,6 +206,17 @@ impl AppState {
         self.peak_element = ElementType::Physical;
         self.elemental_breakdown.clear();
     }
+
+    pub fn set_capture_active(&mut self, enabled: bool) {
+        if self.capture_active != enabled {
+            self.capture_active = enabled;
+            self.vision_generation = self.vision_generation.wrapping_add(1);
+        }
+    }
+
+    pub fn accepts_vision_generation(&self, generation: u64) -> bool {
+        self.capture_active && self.vision_generation == generation
+    }
 }
 
 pub type SharedState = Arc<Mutex<AppState>>;
@@ -200,6 +224,21 @@ pub type SharedState = Arc<Mutex<AppState>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_and_pause_invalidate_in_flight_vision_results() {
+        let mut state = AppState::new();
+        assert!(!state.click_through);
+        let generation = state.vision_generation;
+        assert!(state.accepts_vision_generation(generation));
+        state.reset();
+        assert!(!state.accepts_vision_generation(generation));
+        let generation = state.vision_generation;
+        state.set_capture_active(false);
+        state.set_capture_active(true);
+        assert!(!state.accepts_vision_generation(generation));
+        assert!(state.accepts_vision_generation(state.vision_generation));
+    }
 
     #[test]
     fn test_record_hit_and_stats() {
@@ -219,7 +258,13 @@ mod tests {
         assert_eq!(stats.peak_hit, 85_000);
         assert_eq!(stats.peak_element, ElementType::Hydro);
         assert_eq!(stats.recent_hits.len(), 2);
-        assert_eq!(*stats.elemental_breakdown.get(&ElementType::Pyro).unwrap(), 12_000);
-        assert_eq!(*stats.elemental_breakdown.get(&ElementType::Hydro).unwrap(), 85_000);
+        assert_eq!(
+            *stats.elemental_breakdown.get(&ElementType::Pyro).unwrap(),
+            12_000
+        );
+        assert_eq!(
+            *stats.elemental_breakdown.get(&ElementType::Hydro).unwrap(),
+            85_000
+        );
     }
 }

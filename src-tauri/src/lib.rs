@@ -2,7 +2,7 @@ pub mod capture;
 pub mod state;
 pub mod vision;
 
-use capture::ScreenCapture;
+use capture::{CaptureOutcome, ScreenCapture};
 use state::{AppState, CombatStats, DamageEvent, ElementType, SharedState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -46,7 +46,7 @@ fn toggle_click_through(
 
 #[tauri::command]
 fn set_capture_active(enabled: bool, state: State<'_, SharedState>) -> bool {
-    state.lock().capture_active = enabled;
+    state.lock().set_capture_active(enabled);
     enabled
 }
 
@@ -65,6 +65,7 @@ fn simulate_hit(
         Some("dendro") => ElementType::Dendro,
         Some("anemo") => ElementType::Anemo,
         Some("geo") => ElementType::Geo,
+        Some("physical") => ElementType::Physical,
         _ => {
             // Random element
             let all = [
@@ -165,6 +166,8 @@ pub fn run() {
                     }
                 };
                 let mut last_stats_emit = Instant::now();
+                let mut vision_generation = state_clone.lock().vision_generation;
+                let mut last_capture_status = "";
                 #[cfg(windows)]
                 let mut f8_was_down = false;
                 #[cfg(windows)]
@@ -182,29 +185,57 @@ pub fn run() {
                             if let Some(window) = app_handle.get_webview_window("main") {
                                 let mut s = state_clone.lock();
                                 let new_state = !s.click_through;
-                                s.click_through = new_state;
-                                let _ = window.set_ignore_cursor_events(new_state);
-                                let _ = app_handle.emit("clickthrough-toggled", new_state);
+                                if window.set_ignore_cursor_events(new_state).is_ok() {
+                                    s.click_through = new_state;
+                                    let _ = app_handle.emit("clickthrough-toggled", new_state);
+                                }
                             }
                         }
                         f8_was_down = f8_down;
                     }
 
-                    let is_active = state_clone.lock().capture_active;
+                    let (is_active, generation) = {
+                        let s = state_clone.lock();
+                        (s.capture_active, s.vision_generation)
+                    };
+                    if generation != vision_generation {
+                        vision.reset();
+                        vision_generation = generation;
+                    }
                     if is_active {
-                        if let Some(frame) = capture.capture() {
+                        match capture.capture() {
+                          CaptureOutcome::Frame(frame) => {
+                            if last_capture_status != "tracking" {
+                                let _ = app_handle.emit("capture-status", "tracking");
+                                last_capture_status = "tracking";
+                            }
                             let hits = vision.process_frame(&frame);
                             if !hits.is_empty() {
                                 let mut s = state_clone.lock();
+                                // Reset/pause may have happened while OCR was running.
+                                if s.accepts_vision_generation(generation) {
                                 for hit in hits {
                                     println!("[Hit Detected] {} {:?} (crit: {}) at ({},{})", hit.value, hit.element, hit.is_crit, hit.x, hit.y);
                                     let event = s.record_hit(hit.value, hit.element, hit.is_crit, hit.x, hit.y);
                                     let _ = app_handle.emit("damage-hit", &event);
                                 }
+                                }
                             }
-                        } else {
-                            // Game is minimized or paused - clear tracking history
+                          }
+                          CaptureOutcome::NoNewFrame => vision.no_new_frame(Instant::now()),
+                          CaptureOutcome::Unavailable => {
                             vision.reset();
+                            if last_capture_status != "unavailable" {
+                                let _ = app_handle.emit("capture-status", "unavailable");
+                                last_capture_status = "unavailable";
+                            }
+                          }
+                        }
+                    } else {
+                        vision.reset();
+                        if last_capture_status != "paused" {
+                            let _ = app_handle.emit("capture-status", "paused");
+                            last_capture_status = "paused";
                         }
                     }
 
@@ -212,6 +243,8 @@ pub fn run() {
                     if last_stats_emit.elapsed() >= Duration::from_millis(250) {
                         let stats = state_clone.lock().compute_stats();
                         let _ = app_handle.emit("combat-stats", &stats);
+                        // Repeat state so a frontend that subscribes after startup recovers.
+                        let _ = app_handle.emit("capture-status", last_capture_status);
                         last_stats_emit = Instant::now();
                     }
 
