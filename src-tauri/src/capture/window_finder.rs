@@ -6,7 +6,7 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetClientRect, IsWindowVisible, IsIconic,
+    FindWindowW, GetClientRect, IsIconic, IsWindowVisible,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -32,12 +32,7 @@ impl WindowFinder {
 
         // Try Global English title
         let title_en = to_wide_chars("Genshin Impact");
-        let hwnd = unsafe {
-            FindWindowW(
-                PCWSTR(class_name.as_ptr()),
-                PCWSTR(title_en.as_ptr()),
-            )
-        };
+        let hwnd = unsafe { FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR(title_en.as_ptr())) };
         if let Ok(h) = hwnd {
             if !h.0.is_null() && unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() } {
                 return Some(h);
@@ -46,12 +41,8 @@ impl WindowFinder {
 
         // Try CN title
         let title_cn = to_wide_chars("原神");
-        let hwnd_cn = unsafe {
-            FindWindowW(
-                PCWSTR(class_name.as_ptr()),
-                PCWSTR(title_cn.as_ptr()),
-            )
-        };
+        let hwnd_cn =
+            unsafe { FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR(title_cn.as_ptr())) };
         if let Ok(h) = hwnd_cn {
             if !h.0.is_null() && unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() } {
                 return Some(h);
@@ -90,7 +81,8 @@ impl WindowFinder {
             let height = (client_rect.bottom - client_rect.top).max(0) as u32;
 
             // Real Genshin client window is at least 640x480 and positioned on screen
-            if width < 640 || height < 480 || pt.x < -1000 || pt.y < -1000 {
+            // Negative origins are valid for monitors left of / above the primary.
+            if width < 640 || height < 480 {
                 return None;
             }
 
