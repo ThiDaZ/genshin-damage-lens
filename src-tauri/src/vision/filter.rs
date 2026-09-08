@@ -35,6 +35,8 @@ impl BoundingBox {
 pub struct DetectedComponent {
     pub bbox: BoundingBox,
     pub element: ElementType,
+    /// Seed hue keeps same-element text separate from differently colored effects.
+    pub hue: u16,
     pub pixel_count: usize,
     pub mask: Vec<u8>, // Local binary bitmap of the component
 }
@@ -91,44 +93,57 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
         return None;
     }
 
-    // Physical: High brightness, very low saturation (White / Silver)
-    if s <= 18 && v >= 85 {
+    // Physical: Strictly neutral white/silver (very low saturation, high brightness)
+    if s <= 8 && v >= 85 {
         return Some(ElementType::Physical);
     }
 
-    // Electro: Violet / Magenta / Pink (Glowing core can have low saturation down to 18)
-    if (245..=335).contains(&h) && s >= 18 && v >= 60 {
+    // Electro: Violet / Magenta / Lavender / Pink
+    if (245..=341).contains(&h) && s >= 10 && v >= 60 {
         return Some(ElementType::Electro);
     }
 
-    // Cryo: Ice Cyan / Frost Blue (Allow bright ice-blue cores down to saturation 22)
-    if (176..=205).contains(&h) && s >= 22 && v >= 65 {
+    // Dendro: Leaf Green / Lime / Emerald
+    if (55..=155).contains(&h) && s >= 16 && v >= 60 {
+        return Some(ElementType::Dendro);
+    }
+
+    // Anemo: Turquoise / Mint
+    if (156..=175).contains(&h) && s >= 18 && v >= 60 {
+        return Some(ElementType::Anemo);
+    }
+
+    // Cryo vs Hydro:
+    // Cryo is pale icy cyan with low saturation (S <= 50%).
+    // Hydro is saturated ocean blue (S > 50% in 193..=205, or any S >= 18 in 206..=244).
+    if (176..=205).contains(&h) && s >= 12 && s <= 50 && v >= 65 {
         return Some(ElementType::Cryo);
     }
-
-    // Elemental hits must have sufficient saturation
-    if s < 28 {
-        return None;
+    if ((193..=205).contains(&h) && s > 50 && v >= 60)
+        || ((206..=244).contains(&h) && s >= 18 && v >= 60)
+    {
+        return Some(ElementType::Hydro);
     }
 
-    // Element hue boundaries
-    match h {
-        // Pyro: Red-Orange
-        0..=22 | 340..=360 => Some(ElementType::Pyro),
-        // Geo: Amber / Gold
-        23..=58 => Some(ElementType::Geo),
-        // Dendro: Lime / Bright Green
-        59..=140 => Some(ElementType::Dendro),
-        // Anemo: Turquoise / Mint
-        141..=175 => Some(ElementType::Anemo),
-        // Cryo: Ice Cyan / Frost Blue
-        176..=205 => Some(ElementType::Cryo),
-        // Hydro: Deep Ocean Blue
-        206..=244 => Some(ElementType::Hydro),
-        // Electro: Violet / Magenta
-        245..=335 => Some(ElementType::Electro),
-        _ => None,
+    // Pyro vs Geo:
+    // Pure red/red-orange: H 0..=22 and 342..=360
+    if ((342..=360).contains(&h) || (0..=22).contains(&h)) && s >= 40 && v >= 60 {
+        return Some(ElementType::Pyro);
     }
+    // Separate saturated orange Pyro from paler amber Geo.
+    if (23..=42).contains(&h) {
+        let b_ratio = b as f32 / (r as f32).max(1.0);
+        if b_ratio <= 0.32 && s >= 45 && v >= 60 {
+            return Some(ElementType::Pyro);
+        } else if b_ratio >= 0.35 && s >= 30 && v >= 60 {
+            return Some(ElementType::Geo);
+        }
+    }
+    if (43..=54).contains(&h) && s >= 30 && v >= 60 {
+        return Some(ElementType::Geo);
+    }
+
+    None
 }
 
 pub struct ColorFilter;
@@ -175,6 +190,11 @@ impl ColorFilter {
                     continue;
                 }
 
+                // Exclude bottom-right skill and burst icons & cooldown timers
+                if xf > 0.83 && yf > 0.66 {
+                    continue;
+                }
+
                 let idx = y * w + x;
                 if visited[idx] {
                     continue;
@@ -204,18 +224,27 @@ impl ColorFilter {
     }
 
     /// Calculate ratio of dark pixels immediately surrounding a bounding box
-    pub fn dark_outline_ratio(frame: &RawFrame, min_x: usize, max_x: usize, min_y: usize, max_y: usize) -> f32 {
+    pub fn dark_outline_ratio(
+        frame: &RawFrame,
+        min_x: usize,
+        max_x: usize,
+        min_y: usize,
+        max_y: usize,
+    ) -> f32 {
         let w = frame.width as usize;
         let h = frame.height as usize;
         let stride = frame.stride;
         let data = &frame.data;
 
+        let scale = (h as f32 / 720.0).max(1.0);
+        let dist = ((1.0 * scale).round() as usize).max(1);
+
         let mut dark_count = 0usize;
         let mut sample_count = 0usize;
 
-        // Sample 1 pixel outside the bounding box
-        let y_top = min_y.saturating_sub(1);
-        let y_bot = (max_y + 1).min(h.saturating_sub(1));
+        // Sample outside the bounding box
+        let y_top = min_y.saturating_sub(dist);
+        let y_bot = (max_y + dist).min(h.saturating_sub(1));
 
         for x in (min_x..=max_x).step_by(2) {
             if x < w {
@@ -223,7 +252,7 @@ impl ColorFilter {
                     let off = y * stride + x * 4;
                     if off + 3 < data.len() {
                         let (_, _, v) = rgb_to_hsv(data[off + 2], data[off + 1], data[off]);
-                        if v <= 48 {
+                        if v <= 50 {
                             dark_count += 1;
                         }
                         sample_count += 1;
@@ -232,8 +261,8 @@ impl ColorFilter {
             }
         }
 
-        let x_left = min_x.saturating_sub(1);
-        let x_right = (max_x + 1).min(w.saturating_sub(1));
+        let x_left = min_x.saturating_sub(dist);
+        let x_right = (max_x + dist).min(w.saturating_sub(1));
 
         for y in (min_y..=max_y).step_by(2) {
             if y < h {
@@ -241,7 +270,7 @@ impl ColorFilter {
                     let off = y * stride + x * 4;
                     if off + 3 < data.len() {
                         let (_, _, v) = rgb_to_hsv(data[off + 2], data[off + 1], data[off]);
-                        if v <= 48 {
+                        if v <= 50 {
                             dark_count += 1;
                         }
                         sample_count += 1;
@@ -258,11 +287,17 @@ impl ColorFilter {
     }
 
     /// Verify that a candidate component has a dark outline / drop shadow
-    pub fn has_dark_outline(frame: &RawFrame, min_x: usize, max_x: usize, min_y: usize, max_y: usize) -> bool {
+    pub fn has_dark_outline(
+        frame: &RawFrame,
+        min_x: usize,
+        max_x: usize,
+        min_y: usize,
+        max_y: usize,
+    ) -> bool {
         Self::dark_outline_ratio(frame, min_x, max_x, min_y, max_y) >= 0.18
     }
 
-    fn extract_component(
+    pub(crate) fn extract_component(
         frame: &RawFrame,
         start_x: usize,
         start_y: usize,
@@ -276,6 +311,27 @@ impl ColorFilter {
         let data = &frame.data;
 
         let mut queue = Vec::with_capacity(256);
+        let seed_offset = start_y * stride + start_x * 4;
+        let seed_hsv = rgb_to_hsv(
+            data[seed_offset + 2],
+            data[seed_offset + 1],
+            data[seed_offset],
+        );
+        // Damage text can share its element with an enormous attack effect.
+        // Separate orange text from red effects within the Pyro color range.
+        let matches_seed = |r, g, b| {
+            if classify_element(r, g, b) != Some(target_elem) {
+                return false;
+            }
+            let hsv = rgb_to_hsv(r, g, b);
+            match target_elem {
+                ElementType::Pyro => (23..=42).contains(&hsv.0) == (23..=42).contains(&seed_hsv.0),
+                // Purple text must not flood into reddish, low-saturation scenery
+                // that also falls inside the broad Electro classification range.
+                ElementType::Electro => (hsv.0 <= 305) == (seed_hsv.0 <= 305),
+                _ => true,
+            }
+        };
         queue.push((start_x, start_y));
         visited[start_y * w + start_x] = true;
 
@@ -309,6 +365,9 @@ impl ColorFilter {
 
             for (nx, ny) in neighbors {
                 if nx < w && ny < h {
+                    if (nx as f32 / w as f32) > 0.83 && (ny as f32 / h as f32) > 0.66 {
+                        continue;
+                    }
                     let n_idx = ny * w + nx;
                     if !visited[n_idx] {
                         let px_offset = ny * stride + nx * 4;
@@ -317,7 +376,7 @@ impl ColorFilter {
                             let g = data[px_offset + 1];
                             let r = data[px_offset + 2];
 
-                            if classify_element(r, g, b) == Some(target_elem) {
+                            if matches_seed(r, g, b) {
                                 visited[n_idx] = true;
                                 queue.push((nx, ny));
                             }
@@ -344,20 +403,13 @@ impl ColorFilter {
 
         // Aspect ratio filter: single digits to wide multi-digit clumps
         let aspect = comp_w as f32 / comp_h as f32;
-        if aspect < 0.18 || aspect > 6.0 {
+        if aspect < 0.18 || aspect > 8.5 {
             return None;
         }
 
         // Minimum pixel density
         if count < (10.0 * scale) as usize {
             return None;
-        }
-
-        // Physical damage numbers must have a dark outline to reject white snow/floor/dialogues
-        if target_elem == ElementType::Physical {
-            if !Self::has_dark_outline(frame, min_x, max_x, min_y, max_y) {
-                return None;
-            }
         }
 
         // Build binary mask for template matching
@@ -369,11 +421,27 @@ impl ColorFilter {
                     let b = data[px_offset];
                     let g = data[px_offset + 1];
                     let r = data[px_offset + 2];
-                    if classify_element(r, g, b) == Some(target_elem) {
+                    if matches_seed(r, g, b) {
                         mask[(cy - min_y) * comp_w as usize + (cx - min_x)] = 255;
                     }
                 }
             }
+        }
+
+        // A gray outline over a bright attack effect may never reach the absolute
+        // dark threshold. Also measure contrast along the actual glyph boundary.
+        if target_elem == ElementType::Physical
+            && !Self::has_dark_outline(frame, min_x, max_x, min_y, max_y)
+            && !Self::has_contrasting_stroke(
+                frame,
+                min_x,
+                min_y,
+                comp_w as usize,
+                comp_h as usize,
+                &mask,
+            )
+        {
+            return None;
         }
 
         Some(DetectedComponent {
@@ -384,9 +452,68 @@ impl ColorFilter {
                 height: comp_h,
             },
             element: target_elem,
+            hue: seed_hsv.0,
             pixel_count: count,
             mask,
         })
+    }
+
+    fn has_contrasting_stroke(
+        frame: &RawFrame,
+        x0: usize,
+        y0: usize,
+        w: usize,
+        h: usize,
+        mask: &[u8],
+    ) -> bool {
+        let distance = (frame.height as f32 / 720.0).round().max(1.0) as i64;
+        let inside = |x: i64, y: i64| {
+            x >= 0
+                && y >= 0
+                && x < w as i64
+                && y < h as i64
+                && mask[y as usize * w + x as usize] > 0
+        };
+        let brightness = |x: usize, y: usize| {
+            let p = y * frame.stride + x * 4;
+            frame.data[p..p + 3].iter().copied().max().unwrap_or(0)
+        };
+        let mut boundary = 0;
+        let mut contrasted = 0;
+        for y in 0..h {
+            for x in 0..w {
+                if !inside(x as i64, y as i64) {
+                    continue;
+                }
+                let directions = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+                if directions
+                    .iter()
+                    .all(|&(dx, dy)| inside(x as i64 + dx, y as i64 + dy))
+                {
+                    continue;
+                }
+                let value = brightness(x0 + x, y0 + y);
+                let mut contrast = false;
+                for (dx, dy) in directions {
+                    let nx = x as i64 + dx * distance;
+                    let ny = y as i64 + dy * distance;
+                    let sx = x0 as i64 + nx;
+                    let sy = y0 as i64 + ny;
+                    if !inside(nx, ny)
+                        && sx >= 0
+                        && sy >= 0
+                        && sx < frame.width as i64
+                        && sy < frame.height as i64
+                    {
+                        contrast |=
+                            value.saturating_sub(brightness(sx as usize, sy as usize)) >= 60;
+                    }
+                }
+                boundary += 1;
+                contrasted += usize::from(contrast);
+            }
+        }
+        boundary >= 10 && contrasted as f32 / boundary as f32 >= 0.65
     }
 
     /// Split a touching multi-digit component into individual glyph components via column projection valleys
@@ -400,6 +527,10 @@ impl ColorFilter {
         // Two touching digits have aspect >= 1.15.
         if aspect < 1.15 || w < (24.0 * scale) as usize {
             return vec![comp];
+        }
+
+        if let Some(glyphs) = crate::vision::matcher::DigitMatcher::split_number_component(&comp) {
+            return glyphs;
         }
 
         // Compute column projection
@@ -430,7 +561,8 @@ impl ColorFilter {
             } else if in_valley {
                 if best_valley_x > 0 {
                     let last_split = splits.last().copied().unwrap_or(0);
-                    if best_valley_x - last_split >= min_digit_w && w - best_valley_x >= min_digit_w {
+                    if best_valley_x - last_split >= min_digit_w && w - best_valley_x >= min_digit_w
+                    {
                         splits.push(best_valley_x);
                     }
                 }
@@ -500,6 +632,7 @@ impl ColorFilter {
                         height: tight_h,
                     },
                     element: comp.element,
+                    hue: comp.hue,
                     pixel_count: sub_pixels,
                     mask: sub_mask,
                 });
@@ -546,13 +679,14 @@ impl ColorFilter {
 
     /// Group individual digit components into horizontally-aligned damage clusters
     pub fn cluster_components(comps: Vec<DetectedComponent>) -> Vec<DamageCluster> {
-        let max_y = comps.iter().map(|c| c.bbox.y + c.bbox.height).max().unwrap_or(720);
-        let scale = (max_y as f32 / 600.0).max(1.0);
-        Self::cluster_components_scaled(comps, scale)
+        Self::cluster_components_scaled(comps, 1.0)
     }
 
     /// Group components using explicit resolution scale factor
-    pub fn cluster_components_scaled(comps: Vec<DetectedComponent>, scale: f32) -> Vec<DamageCluster> {
+    pub fn cluster_components_scaled(
+        comps: Vec<DetectedComponent>,
+        scale: f32,
+    ) -> Vec<DamageCluster> {
         // Expand any multi-digit components into separated glyphs
         let mut individual_glyphs = Vec::with_capacity(comps.len() * 2);
         for c in comps {
@@ -565,10 +699,13 @@ impl ColorFilter {
                 let max_w = (45.0 * scale) as u32;
                 let min_px = (8.0 * scale) as usize;
 
-                if s.bbox.height >= min_h && s.bbox.height <= max_h
-                    && s.bbox.width >= min_w && s.bbox.width <= max_w
+                if s.bbox.height >= min_h
+                    && s.bbox.height <= max_h
+                    && s.bbox.width >= min_w
+                    && s.bbox.width <= max_w
                     && s.pixel_count >= min_px
-                    && aspect >= 0.16 && aspect <= 1.10
+                    && aspect >= 0.16
+                    && aspect <= 1.10
                 {
                     individual_glyphs.push(s);
                 }
@@ -587,6 +724,16 @@ impl ColorFilter {
                 if last.element != c.element {
                     continue;
                 }
+                if last.element == ElementType::Pyro {
+                    let last_orange = (23..=42).contains(&last.hue);
+                    let current_orange = (23..=42).contains(&c.hue);
+                    if last_orange != current_orange {
+                        continue;
+                    }
+                }
+                if last.element == ElementType::Electro && (last.hue <= 305) != (c.hue <= 305) {
+                    continue;
+                }
 
                 let is_last_exclamation = Self::is_exclamation_glyph(last);
                 if is_last_exclamation {
@@ -598,8 +745,16 @@ impl ColorFilter {
                 let max_h = last.bbox.height.max(c.bbox.height) as i32;
 
                 let is_curr_exclamation = Self::is_exclamation_glyph(&c);
-                let max_allowed_dy = if is_curr_exclamation { (max_h as f32 * 0.50) as i32 } else { (max_h as f32 * 0.40) as i32 };
-                let max_allowed_dh = if is_curr_exclamation { (max_h as f32 * 0.55) as i32 } else { (max_h as f32 * 0.40) as i32 };
+                let max_allowed_dy = if is_curr_exclamation {
+                    (max_h as f32 * 0.50) as i32
+                } else {
+                    (max_h as f32 * 0.40) as i32
+                };
+                let max_allowed_dh = if is_curr_exclamation {
+                    (max_h as f32 * 0.55) as i32
+                } else {
+                    (max_h as f32 * 0.40) as i32
+                };
 
                 if dy <= max_allowed_dy && dh <= max_allowed_dh {
                     let gap = c.bbox.x as i32 - (last.bbox.x + last.bbox.width) as i32;
@@ -629,7 +784,8 @@ impl ColorFilter {
             // Health bar rejection: a thin horizontal segmented bar where all slices are narrow sticks
             let total_w: u32 = glyphs.iter().map(|g| g.bbox.width).sum();
             let avg_asp = total_w as f32 / (glyphs.len() as f32 * glyphs[0].bbox.height as f32);
-            if glyphs.len() >= 3 && avg_asp < 0.35 && glyphs[0].bbox.height <= (18.0 * scale) as u32 {
+            if glyphs.len() >= 3 && avg_asp < 0.35 && glyphs[0].bbox.height <= (18.0 * scale) as u32
+            {
                 continue;
             }
 
@@ -662,6 +818,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn relative_outline_accepts_gray_shadow_but_rejects_flat_white() {
+        let mut frame = RawFrame {
+            width: 32,
+            height: 32,
+            stride: 128,
+            data: vec![170; 32 * 32 * 4],
+            screen_x: 0,
+            screen_y: 0,
+        };
+        let mask = vec![255; 8 * 16];
+        for y in 8..24 {
+            for x in 8..16 {
+                frame.data[y * frame.stride + x * 4..y * frame.stride + x * 4 + 3].fill(250);
+            }
+        }
+        assert!(!ColorFilter::has_dark_outline(&frame, 8, 15, 8, 23));
+        assert!(ColorFilter::has_contrasting_stroke(
+            &frame, 8, 8, 8, 16, &mask
+        ));
+        frame.data.fill(250);
+        assert!(!ColorFilter::has_contrasting_stroke(
+            &frame, 8, 8, 8, 16, &mask
+        ));
+    }
+
+    #[test]
     fn test_element_classification() {
         // Pyro (Vibrant Red-Orange)
         assert_eq!(classify_element(255, 60, 20), Some(ElementType::Pyro));
@@ -675,6 +857,7 @@ mod tests {
         assert_eq!(classify_element(120, 240, 40), Some(ElementType::Dendro));
         // Geo (Amber/Gold)
         assert_eq!(classify_element(255, 190, 30), Some(ElementType::Geo));
+        assert_eq!(classify_element(255, 153, 4), Some(ElementType::Pyro));
         // Anemo (Mint/Teal)
         assert_eq!(classify_element(40, 240, 190), Some(ElementType::Anemo));
         // Physical (Bright White)
