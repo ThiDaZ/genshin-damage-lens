@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -51,8 +51,8 @@ jobs:
 
   build:
     name: Build app
-    # Only after a merge: proves main still produces a runnable executable.
-    if: github.event_name == 'push'
+    # Only after a merge to main: proves it still produces a runnable executable.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: windows-latest
     steps:

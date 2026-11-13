@@ -113,7 +113,7 @@ See [replay evaluation](docs/recognition.md) for annotation format, metrics and 
 
 GitHub Actions runs on Windows runners, since capture is Windows-only.
 
-- **CI** (`.github/workflows/ci.yml`): every pull request to `main` and every push to `main` runs the tests, `cargo check --all-targets`, both replay checks and the frontend syntax check. A push to `main` also builds the application and keeps the executable as a workflow artifact for 14 days.
+- **CI** (`.github/workflows/ci.yml`): every pull request to `main` or `dev` and every push to either branch runs the tests, `cargo check --all-targets`, both replay checks and the frontend syntax check. A push to `main` also builds the application and keeps the executable as a workflow artifact for 14 days.
 - **Release** (`.github/workflows/release.yml`): pushing a tag such as `v0.2.0` builds the MSI and NSIS installers and publishes a GitHub release with generated notes. The tag is the version: it is written into `tauri.conf.json` and `package.json` during the build, so the installers and the release carry the same number without a version-bump commit.
 
 ```powershell
