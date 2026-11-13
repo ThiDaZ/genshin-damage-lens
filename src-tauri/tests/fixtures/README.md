@@ -1,5 +1,7 @@
 # Recognition fixtures
 
+All PNGs listed below are tracked in git. `src-tauri/tests/recognition.rs` requires them.
+
 These full-size PNGs were copied from the existing local gameplay screenshots on
 2026-09-08, so the small regression set is available in a fresh checkout.
 

@@ -103,7 +103,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --offline --release --example rep
 cargo run --manifest-path src-tauri/Cargo.toml --offline --release --example replay -- src-tauri/tests/fixtures/electro-events.json --check
 ```
 
-Remove `--offline` when dependencies have not been downloaded. Test builds optimize the pixel-processing loops. The checked-in recognition tests fail if their images are missing. Older diagnostic/video tests use optional local `sample_video/` and `scratch/` recordings and may skip when those files are absent; their results are not a complete accuracy benchmark.
+Remove `--offline` when dependencies have not been downloaded. Test builds optimize the pixel-processing loops. The checked-in recognition tests fail if their images are missing. The older diagnostic and element-video tests in `src-tauri/src/vision/mod.rs` depend on local, gitignored `sample_video/` and `scratch/` recordings and are marked `#[ignore]`, so the default run does not include them. Run them explicitly with `cargo test ... -- --ignored` when those recordings exist; their results are not a complete accuracy benchmark.
 
 See [replay evaluation](docs/recognition.md) for annotation format, metrics and the next OCR decision.
 
