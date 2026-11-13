@@ -1,0 +1,75 @@
+name: Release
+
+# Push a tag like v0.2.0 to build the installers and publish a GitHub release.
+# The tag is the version: it is written into the app before building, so the
+# installer, the executable and the release all carry the same number.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Set version from tag
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          node -e '
+            const fs = require("fs");
+            for (const file of ["src-tauri/tauri.conf.json", "package.json"]) {
+              const json = JSON.parse(fs.readFileSync(file, "utf8"));
+              json.version = process.argv[1];
+              fs.writeFileSync(file, JSON.stringify(json, null, 2) + "\n");
+            }
+          ' "$version"
+          echo "Building version $version"
+
+      - name: Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build installers
+        run: pnpm exec tauri build
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "GenshinDamageLens $VERSION" \
+            --generate-notes \
+            --verify-tag \
+            src-tauri/target/release/bundle/msi/*.msi \
+            src-tauri/target/release/bundle/nsis/*.exe

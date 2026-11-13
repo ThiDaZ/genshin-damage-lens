@@ -109,6 +109,20 @@ Remove `--offline` when dependencies have not been downloaded. Test builds optim
 
 See [replay evaluation](docs/recognition.md) for annotation format, metrics and the next OCR decision.
 
+## CI and releases
+
+GitHub Actions runs on Windows runners, since capture is Windows-only.
+
+- **CI** (`.github/workflows/ci.yml`): every pull request to `main` and every push to `main` runs the tests, `cargo check --all-targets`, both replay checks and the frontend syntax check. A push to `main` also builds the application and keeps the executable as a workflow artifact for 14 days.
+- **Release** (`.github/workflows/release.yml`): pushing a tag such as `v0.2.0` builds the MSI and NSIS installers and publishes a GitHub release with generated notes. The tag is the version: it is written into `tauri.conf.json` and `package.json` during the build, so the installers and the release carry the same number without a version-bump commit.
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Tags must be `v` followed by three numbers; the MSI format accepts nothing else. The installers are not code-signed, so Windows SmartScreen warns on first run.
+
 ## Current limits
 
 - F8 is registered as a system-wide hotkey. If another program already owns F8 the overlay falls back to watching the key, which cannot see key presses while a window running as administrator has focus. Genshin Impact normally runs as administrator, so in that case start the overlay as administrator too.

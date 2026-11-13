@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR replaces the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    # The capture backend is Windows-only (DXGI, Win32).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Unit and fixture tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Check all targets
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+
+      - name: Replay labeled fixtures
+        run: |
+          cargo run --manifest-path src-tauri/Cargo.toml --locked --release --example replay -- src-tauri/tests/fixtures/recognition.json --check
+          cargo run --manifest-path src-tauri/Cargo.toml --locked --release --example replay -- src-tauri/tests/fixtures/electro-events.json --check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check frontend script
+        run: node --check src/main.js
+
+  build:
+    name: Build app
+    # Only after a merge: proves main still produces a runnable executable.
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build without installers
+        run: pnpm exec tauri build --no-bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genshin-damage-lens-${{ github.sha }}
+          path: src-tauri/target/release/genshin-damage-lens.exe
+          if-no-files-found: error
+          retention-days: 14
