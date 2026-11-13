@@ -15,6 +15,11 @@ pub struct VisionEngine {
     tracker: HitTracker,
 }
 
+pub struct FrameAnalysis {
+    pub detections: Vec<Detection>,
+    pub hits: Vec<ConfirmedHit>,
+}
+
 impl VisionEngine {
     pub fn try_new() -> Result<Self, String> {
         Ok(Self {
@@ -41,9 +46,15 @@ impl VisionEngine {
 
     /// Use the recording's timestamps when replaying frames, not decode wall time.
     pub fn process_frame_at(&mut self, frame: &RawFrame, now: Instant) -> Vec<ConfirmedHit> {
+        self.analyze_frame_at(frame, now).hits
+    }
+
+    /// Recognize once and expose both stages for live diagnostics.
+    pub fn analyze_frame_at(&mut self, frame: &RawFrame, now: Instant) -> FrameAnalysis {
         let scale = (frame.height as f32 / 720.0).max(1.0);
         let detections = self.detect_frame(frame);
-        self.tracker.update_at(&detections, scale, now)
+        let hits = self.tracker.update_at(&detections, scale, now);
+        FrameAnalysis { detections, hits }
     }
 
     /// Stateless recognition, also used by the labeled replay evaluator.
