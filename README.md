@@ -21,6 +21,8 @@ The overlay is one small panel on the left edge of the screen; the rest of its w
 
 The panel shows DPS over the last five seconds with a 30-second trend, total damage, average DPS over time spent fighting (gaps of more than five seconds between hits are not counted), hit count, crit rate, peak hit, peak DPS, damage share by element and the most recent hits. The footer shows the capture size, processing time per frame, and how many single-frame readings became confirmed hits in the last two seconds. The terminal prints the same counters as `[Capture diagnostics]`.
 
+The overlay is hidden from screen capture by default, so recorders such as OBS or Streamlabs do not see it. Turn on **Show in recordings** in the `···` menu to make it capturable (use a display or screen capture source; a game capture source only sees the game). While it is on, the capture loop blanks the panel's box in each frame before reading damage, so the panel never reads its own numbers; damage numbers behind the panel are not counted.
+
 A hit appears about 0.6 s after its number shows in game. That is deliberate: the number is watched across frames before its digits are voted on.
 
 Development builds optimize the application's Rust code as well as dependencies. After changing build settings, stop and restart `pnpm run dev` to rebuild it.
