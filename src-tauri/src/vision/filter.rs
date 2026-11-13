@@ -342,7 +342,8 @@ impl ColorFilter {
         let mut count = 0;
 
         // Max component search radius to avoid exploding on large background planes
-        let max_pixels = (4000.0 * scale) as usize;
+        // Text grows briefly on impact; area scales in two dimensions.
+        let max_pixels = (12_000.0 * scale * scale) as usize;
 
         while let Some((cx, cy)) = queue.pop() {
             count += 1;
@@ -396,7 +397,7 @@ impl ColorFilter {
 
         // Height filter scaled by viewport resolution: supports 720p through 4K
         let min_glyph_h = (12.0 * scale) as u32;
-        let max_glyph_h = (55.0 * scale) as u32;
+        let max_glyph_h = (110.0 * scale) as u32;
         if comp_h < min_glyph_h || comp_h > max_glyph_h {
             return None;
         }
@@ -476,7 +477,12 @@ impl ColorFilter {
         };
         let brightness = |x: usize, y: usize| {
             let p = y * frame.stride + x * 4;
-            frame.data[p..p + 3].iter().copied().max().unwrap_or(0)
+            // Perceived brightness, not max(R,G,B): saturated blue effects can
+            // have a 255 channel while still strongly contrasting with white text.
+            ((54 * u32::from(frame.data[p + 2])
+                + 183 * u32::from(frame.data[p + 1])
+                + 19 * u32::from(frame.data[p]))
+                / 256) as u8
         };
         let mut boundary = 0;
         let mut contrasted = 0;
@@ -687,6 +693,7 @@ impl ColorFilter {
         comps: Vec<DetectedComponent>,
         scale: f32,
     ) -> Vec<DamageCluster> {
+        let comps = crate::vision::matcher::DigitMatcher::merge_vertical_fragments(comps, scale);
         // Expand any multi-digit components into separated glyphs
         let mut individual_glyphs = Vec::with_capacity(comps.len() * 2);
         for c in comps {
@@ -694,9 +701,9 @@ impl ColorFilter {
             for s in split {
                 let aspect = s.bbox.width as f32 / s.bbox.height as f32;
                 let min_h = (12.0 * scale) as u32;
-                let max_h = (55.0 * scale) as u32;
+                let max_h = (110.0 * scale) as u32;
                 let min_w = (4.0 * scale) as u32;
-                let max_w = (45.0 * scale) as u32;
+                let max_w = (100.0 * scale) as u32;
                 let min_px = (8.0 * scale) as usize;
 
                 if s.bbox.height >= min_h
@@ -837,6 +844,18 @@ mod tests {
         assert!(ColorFilter::has_contrasting_stroke(
             &frame, 8, 8, 8, 16, &mask
         ));
+        for pixel in frame.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[255, 80, 20, 255]);
+        }
+        for y in 8..24 {
+            for x in 8..16 {
+                frame.data[y * frame.stride + x * 4..y * frame.stride + x * 4 + 3].fill(250);
+            }
+        }
+        assert!(
+            ColorFilter::has_contrasting_stroke(&frame, 8, 8, 8, 16, &mask),
+            "White text contrasts with saturated blue even when its blue channel is 255"
+        );
         frame.data.fill(250);
         assert!(!ColorFilter::has_contrasting_stroke(
             &frame, 8, 8, 8, 16, &mask
