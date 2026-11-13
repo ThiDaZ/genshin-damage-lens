@@ -86,6 +86,11 @@ pub struct AppState {
     pub last_hit: Option<Instant>,
     pub capture_active: bool,
     pub click_through: bool,
+    /// Whether screen recorders (and therefore our own capture) see the overlay.
+    pub show_in_recordings: bool,
+    /// The panel's box inside the overlay window, in physical pixels
+    /// (x, y, width, height), as reported by the frontend.
+    pub panel_rect: Option<(i32, i32, u32, u32)>,
     /// Invalidates pending vision work across session resets and capture changes.
     pub vision_generation: u64,
 }
@@ -106,6 +111,8 @@ impl AppState {
             last_hit: None,
             capture_active: true,
             click_through: false,
+            show_in_recordings: false,
+            panel_rect: None,
             vision_generation: 0,
         }
     }
