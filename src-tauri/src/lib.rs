@@ -168,6 +168,12 @@ pub fn run() {
                 let mut last_stats_emit = Instant::now();
                 let mut vision_generation = state_clone.lock().vision_generation;
                 let mut last_capture_status = "";
+                let mut diagnostics_started = Instant::now();
+                let mut diagnostic_frames = 0u32;
+                let mut diagnostic_candidates = 0usize;
+                let mut diagnostic_hits = 0usize;
+                let mut diagnostic_ocr_ms = 0.0;
+                let mut diagnostic_size = (0, 0);
                 #[cfg(windows)]
                 let mut f8_was_down = false;
                 #[cfg(windows)]
@@ -209,7 +215,14 @@ pub fn run() {
                                 let _ = app_handle.emit("capture-status", "tracking");
                                 last_capture_status = "tracking";
                             }
-                            let hits = vision.process_frame(&frame);
+                            let observed_at = Instant::now();
+                            let analysis = vision.analyze_frame_at(&frame, observed_at);
+                            diagnostic_frames += 1;
+                            diagnostic_candidates += analysis.detections.len();
+                            diagnostic_hits += analysis.hits.len();
+                            diagnostic_ocr_ms += observed_at.elapsed().as_secs_f64() * 1000.0;
+                            diagnostic_size = (frame.width, frame.height);
+                            let hits = analysis.hits;
                             if !hits.is_empty() {
                                 let mut s = state_clone.lock();
                                 // Reset/pause may have happened while OCR was running.
@@ -240,6 +253,24 @@ pub fn run() {
                     }
 
                     // Emit rolling stats update 4 times a second
+                    if diagnostics_started.elapsed() >= Duration::from_secs(2) {
+                        let fps = f64::from(diagnostic_frames) / diagnostics_started.elapsed().as_secs_f64();
+                        let average_ms = if diagnostic_frames > 0 { diagnostic_ocr_ms / f64::from(diagnostic_frames) } else { 0.0 };
+                        let diagnostics = serde_json::json!({
+                            "status": last_capture_status, "fps": fps,
+                            "width": diagnostic_size.0, "height": diagnostic_size.1,
+                            "candidates": diagnostic_candidates, "hits": diagnostic_hits,
+                            "processing_ms": average_ms,
+                        });
+                        println!("[Capture diagnostics] {diagnostics}");
+                        let _ = app_handle.emit("capture-diagnostics", &diagnostics);
+                        diagnostics_started = Instant::now();
+                        diagnostic_frames = 0;
+                        diagnostic_candidates = 0;
+                        diagnostic_hits = 0;
+                        diagnostic_ocr_ms = 0.0;
+                    }
+
                     if last_stats_emit.elapsed() >= Duration::from_millis(250) {
                         let stats = state_clone.lock().compute_stats();
                         let _ = app_handle.emit("combat-stats", &stats);
