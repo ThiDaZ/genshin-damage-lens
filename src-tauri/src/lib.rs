@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use vision::VisionEngine;
 
-
 #[tauri::command]
 fn get_combat_stats(state: State<'_, SharedState>) -> CombatStats {
     state.lock().compute_stats()
@@ -40,6 +39,79 @@ fn toggle_click_through(
     state.lock().click_through = ignore;
     let _ = app_handle.emit("clickthrough-toggled", ignore);
     Ok(ignore)
+}
+
+/// Hide the overlay from screen capture, or let recorders see it.
+#[cfg(windows)]
+fn apply_capture_visibility(window: &tauri::WebviewWindow, visible: bool) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let affinity = if visible {
+        WDA_NONE
+    } else {
+        WDA_EXCLUDEFROMCAPTURE
+    };
+    unsafe { SetWindowDisplayAffinity(HWND(hwnd.0 as _), affinity) }.map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn apply_capture_visibility(_: &tauri::WebviewWindow, _: bool) -> Result<(), String> {
+    Ok(())
+}
+
+/// Recorders such as OBS or Streamlabs can only show the overlay when it is
+/// not excluded from capture. Our own capture then sees it as well, so the
+/// panel's box is blanked before reading damage (see `mask_panel`).
+#[tauri::command]
+fn set_show_in_recordings(
+    visible: bool,
+    window: tauri::WebviewWindow,
+    state: State<'_, SharedState>,
+) -> Result<bool, String> {
+    apply_capture_visibility(&window, visible)?;
+    state.lock().show_in_recordings = visible;
+    Ok(visible)
+}
+
+/// The frontend reports where the panel sits inside the overlay window.
+#[tauri::command]
+fn set_panel_rect(x: f64, y: f64, width: f64, height: f64, state: State<'_, SharedState>) {
+    let valid = [x, y, width, height].iter().all(|v| v.is_finite()) && width > 0.0 && height > 0.0;
+    state.lock().panel_rect = valid.then(|| {
+        (
+            x.floor() as i32,
+            y.floor() as i32,
+            width.ceil() as u32,
+            height.ceil() as u32,
+        )
+    });
+}
+
+/// Paint the overlay panel black in a captured frame so its own numbers are
+/// never read as damage. `origin` is the overlay window's screen position.
+fn mask_panel(frame: &mut capture::RawFrame, origin: (i32, i32), rect: (i32, i32, u32, u32)) {
+    // A few pixels of margin cover the panel's shadow edge and rounding.
+    const MARGIN: i64 = 6;
+    let left = i64::from(origin.0) + i64::from(rect.0) - MARGIN - i64::from(frame.screen_x);
+    let top = i64::from(origin.1) + i64::from(rect.1) - MARGIN - i64::from(frame.screen_y);
+    let right = left + i64::from(rect.2) + 2 * MARGIN;
+    let bottom = top + i64::from(rect.3) + 2 * MARGIN;
+    let x0 = left.clamp(0, i64::from(frame.width)) as usize;
+    let x1 = right.clamp(0, i64::from(frame.width)) as usize;
+    let y0 = top.clamp(0, i64::from(frame.height)) as usize;
+    let y1 = bottom.clamp(0, i64::from(frame.height)) as usize;
+    if x0 >= x1 {
+        return;
+    }
+    for y in y0..y1 {
+        let row = y * frame.stride;
+        if let Some(pixels) = frame.data.get_mut(row + x0 * 4..row + x1 * 4) {
+            pixels.fill(0);
+        }
+    }
 }
 
 #[tauri::command]
@@ -184,6 +256,8 @@ pub fn run() {
             reset_stats,
             toggle_click_through,
             set_capture_active,
+            set_show_in_recordings,
+            set_panel_rect,
             simulate_hit,
         ])
         .setup(move |app| {
@@ -195,19 +269,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_ignore_cursor_events(false); // Start interactive or toggleable
                 let _ = window.set_always_on_top(true);
-                #[cfg(windows)]
-                if let Ok(hwnd) = window.hwnd() {
-                    use windows::Win32::Foundation::HWND;
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
-                    };
-                    unsafe {
-                        let _ = SetWindowDisplayAffinity(
-                            HWND(hwnd.0 as _),
-                            WINDOW_DISPLAY_AFFINITY(17),
-                        );
-                    }
-                }
+                // Hidden from capture until the user asks to appear in recordings.
+                let _ = apply_capture_visibility(&window, false);
             }
 
             #[cfg(windows)]
@@ -227,6 +290,8 @@ pub fn run() {
                     }
                 };
                 let mut last_stats_emit = Instant::now();
+                let mut overlay_origin: Option<(i32, i32)> = None;
+                let mut overlay_origin_checked = Instant::now() - Duration::from_secs(1);
                 let mut vision_generation = state_clone.lock().vision_generation;
                 let mut last_capture_status = "";
                 let mut diagnostics_started = Instant::now();
@@ -239,17 +304,36 @@ pub fn run() {
                 while running_clone.load(Ordering::Relaxed) {
                     let loop_start = Instant::now();
 
-                    let (is_active, generation) = {
+                    let (is_active, generation, panel) = {
                         let s = state_clone.lock();
-                        (s.capture_active, s.vision_generation)
+                        let panel = if s.show_in_recordings {
+                            s.panel_rect
+                        } else {
+                            None
+                        };
+                        (s.capture_active, s.vision_generation, panel)
                     };
+                    // The overlay window rarely moves; ask for its position
+                    // twice a second rather than every frame.
+                    if panel.is_some()
+                        && overlay_origin_checked.elapsed() >= Duration::from_millis(500)
+                    {
+                        overlay_origin_checked = Instant::now();
+                        overlay_origin = app_handle
+                            .get_webview_window("main")
+                            .and_then(|w| w.inner_position().ok())
+                            .map(|p| (p.x, p.y));
+                    }
                     if generation != vision_generation {
                         vision.reset();
                         vision_generation = generation;
                     }
                     if is_active {
                         let hits = match capture.capture() {
-                            CaptureOutcome::Frame(frame) => {
+                            CaptureOutcome::Frame(mut frame) => {
+                                if let (Some(rect), Some(origin)) = (panel, overlay_origin) {
+                                    mask_panel(&mut frame, origin, rect);
+                                }
                                 if last_capture_status != "tracking" {
                                     let _ = app_handle.emit("capture-status", "tracking");
                                     last_capture_status = "tracking";
@@ -348,4 +432,47 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(width: u32, height: u32, screen: (i32, i32)) -> capture::RawFrame {
+        capture::RawFrame {
+            width,
+            height,
+            stride: width as usize * 4,
+            data: vec![255; (width * height * 4) as usize],
+            screen_x: screen.0,
+            screen_y: screen.1,
+        }
+    }
+
+    #[test]
+    fn panel_mask_blanks_only_the_panel_box() {
+        let mut f = frame(200, 100, (0, 0));
+        mask_panel(&mut f, (0, 0), (50, 20, 40, 30));
+        let px = |x: usize, y: usize| f.data[y * f.stride + x * 4];
+        assert_eq!(px(60, 30), 0);
+        assert_eq!(px(44, 14), 0, "margin is covered");
+        assert_eq!(px(43, 30), 255);
+        assert_eq!(px(60, 57), 255);
+        assert_eq!(px(150, 80), 255);
+    }
+
+    #[test]
+    fn panel_mask_follows_window_and_capture_offsets_and_clips() {
+        // Overlay window at (-1920, 0); the game crop starts at (-1820, 50).
+        let mut f = frame(300, 200, (-1820, 50));
+        mask_panel(&mut f, (-1920, 0), (110, 60, 50, 40));
+        let px = |x: usize, y: usize| f.data[y * f.stride + x * 4];
+        assert_eq!(px(20, 20), 0);
+        assert_eq!(px(70, 20), 255);
+        // Entirely outside the frame: nothing changes, nothing panics.
+        let mut g = frame(100, 100, (0, 0));
+        mask_panel(&mut g, (5000, 5000), (0, 0, 300, 300));
+        mask_panel(&mut g, (-5000, -5000), (0, 0, 300, 300));
+        assert!(g.data.iter().all(|&b| b == 255));
+    }
 }
