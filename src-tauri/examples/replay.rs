@@ -98,6 +98,19 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         }
         processing_ms.push(process_start.elapsed().as_secs_f64() * 1000.0);
     }
+    if manifest.mode == Mode::Events {
+        // Numbers still on screen at the end confirm once they would have expired.
+        let last = manifest.frames.last().map_or(0, |f| f.timestamp_ms);
+        for hit in engine.no_new_frame(start + Duration::from_millis(last + 3_000)) {
+            observed.push(ObservedHit {
+                timestamp_ms: last,
+                value: hit.value,
+                element: hit.element,
+                x: hit.x,
+                y: hit.y,
+            });
+        }
+    }
     let report = score(&manifest.expected_hits, &observed)?;
     let passed = report.missed == 0 && report.false_hits == 0;
     let mean_ms = processing_ms.iter().sum::<f64>() / processing_ms.len() as f64;

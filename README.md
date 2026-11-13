@@ -17,30 +17,28 @@ pnpm run dev
 pnpm run build
 ```
 
-The overlay starts in interactive mode. Press **F8** or the mode button for click-through. The badge shows **Tracking**, **Waiting for game**, or **Paused**, based on the capture worker. Test Hit and Demo Loop generate simulated hits; use Reset before measuring real combat.
+The overlay is one small panel on the left edge of the screen; the rest of its window is transparent. It starts in interactive mode: drag it by its title bar (the position is remembered), pause or resume capture, reset the session, or switch to the compact view. Press **F8**, or the lock button, to let clicks pass through to the game; press **F8** again to use the panel. The status line shows **Tracking**, **Waiting for game** or **Paused**. The `···` menu adds simulated hits for trying the panel without the game; reset before measuring real combat.
 
-The combat feed also shows the actual capture size/FPS, OCR readings and confirmed
-hits from the recent diagnostics interval. Tracking means frames are arriving;
-it does not guarantee that a damage number was recognized. The terminal prints
-the same counters as `[Capture diagnostics]`.
+The panel shows DPS over the last five seconds with a 30-second trend, total damage, average DPS over time spent fighting (gaps of more than five seconds between hits are not counted), hit count, crit rate, peak hit, peak DPS, damage share by element and the most recent hits. The footer shows the capture size, processing time per frame, and how many single-frame readings became confirmed hits in the last two seconds. The terminal prints the same counters as `[Capture diagnostics]`.
 
-Development builds optimize the application's Rust code as well as dependencies.
-After changing build settings, stop and restart `pnpm run dev` to rebuild it.
-Unoptimized pixel processing can run slower than the track expiry interval and
-prevent confirmation even though the badge says Tracking.
+A hit appears about 0.6 s after its number shows in game. That is deliberate: the number is watched across frames before its digits are voted on.
+
+Development builds optimize the application's Rust code as well as dependencies. After changing build settings, stop and restart `pnpm run dev` to rebuild it.
 
 ## Capture and recognition
 
 1. Find the visible Genshin client area and select its display and graphics adapter.
 2. Acquire a DXGI desktop frame, copy it through a CPU-readable staging texture and crop to the game.
-3. Segment damage-colored components, choose touching-glyph cuts using template scores, and assemble number candidates.
-4. Recognize digits using normalized template overlap and shape checks. Recover fragmented digits and check Physical text outlines against both dark and bright backgrounds.
-5. Associate observations by position, motion, size and element. Confirm after at least three observations, 65 ms, upward motion and a confidence-weighted majority for the exact value.
-6. Record a confirmed track once and publish damage and statistics events to the overlay.
+3. Label every pixel by damage color through a lookup table, across cores, and collect the row runs. Connected components are built from runs, so large same-colored areas (sand, sky, effects) cost little and are dropped whole.
+4. Choose touching-glyph cuts using template scores and assemble number candidates.
+5. Recognize digits using normalized template overlap (bit-packed, popcount) and shape checks. Side spurs from same-colored scenery are trimmed first. Recover fragmented digits and check Physical text outlines against both dark and bright backgrounds.
+6. Associate readings into tracks by position, size and element. Numbers follow the camera in any direction and shrink after popping in, so any movement or resize marks a track as damage; text that stays put is HUD.
+7. After 0.6 s, or when the number disappears, vote on the digits per position among readings of the dominant length. A longer reading wins if it repeats exactly and contains the majority reading. Shorter readings inside a tracked number are treated as fragments of it, not as hits. Two-digit values need dense evidence.
+8. Record a confirmed track once. A number that is hidden and comes back with the same value is not counted again; equal numbers visible at the same time are all counted.
 
 An ordinary DXGI timeout ages tracks without clearing them. Missing/minimized game capture or a device error clears tracking; device failures trigger reconstruction with a one-second retry interval. Reset and pause invalidate in-flight recognition results.
 
-This is heuristic OCR. It can miss occluded, brief, overlapping or unusually rendered numbers; confidence scores are not calibrated probabilities. Critical-hit classification is a visual size/marker heuristic. Capture uses OS desktop pixels, without game memory reads or injected hooks. No guarantee of recognition accuracy, game policy compatibility, fixed FPS, CPU or memory usage is implied.
+This is heuristic OCR. It can miss or misread occluded, brief, overlapping or unusually rendered numbers; confidence scores are not calibrated probabilities. Critical-hit classification is a visual size/marker heuristic. Capture uses OS desktop pixels, without game memory reads or injected hooks. No guarantee of recognition accuracy, game policy compatibility, fixed FPS, CPU or memory usage is implied.
 
 ## Architecture
 
@@ -60,14 +58,14 @@ classDiagram
     class VisionEngine {
         +detect_frame() Detection[]
         +process_frame_at() ConfirmedHit[]
-        +no_new_frame()
+        +no_new_frame() ConfirmedHit[]
         +reset()
     }
     class ColorFilter
     class DigitMatcher
     class HitTracker {
         +update_at() ConfirmedHit[]
-        +advance_time()
+        +advance_time() ConfirmedHit[]
         +reset()
     }
     class AppState {
@@ -88,13 +86,13 @@ classDiagram
 |---|---|
 | `src-tauri/src/lib.rs` | Tauri commands, capture loop, reset/pause generation checks, event delivery |
 | `src-tauri/src/capture/` | Window discovery, display selection, desktop capture and crop coordinates |
-| `src-tauri/src/vision/filter.rs` | Color segmentation, outlines, glyph splitting and clustering |
+| `src-tauri/src/vision/filter.rs` | Color labeling, run-based connected components, outlines, glyph splitting and clustering |
 | `src-tauri/src/vision/matcher.rs` | Digit templates, fragment recovery, whole-number validation |
-| `src-tauri/src/vision/tracker.rs` | Motion association, value voting, expiry and deduplication |
+| `src-tauri/src/vision/tracker.rs` | Track association, per-digit voting, fragments, expiry and repeat suppression |
 | `src-tauri/src/vision/replay.rs` | Labeled recognition/event scoring |
-| `src-tauri/src/state.rs` | Session hits, rolling DPS and aggregation |
+| `src-tauri/src/state.rs` | Session hits, rolling/average/peak DPS and aggregation |
 | `src/main.js` | Overlay rendering, IPC and controls |
-| `src-tauri/examples/` | Screenshot inspection and replay commands |
+| `src-tauri/examples/` | Screenshot inspection, labeled replay, live capture probe and recording benchmark |
 | `src-tauri/tests/fixtures/` | Checked-in screenshot regressions and labels |
 
 ## Validation
@@ -116,5 +114,6 @@ See [replay evaluation](docs/recognition.md) for annotation format, metrics and 
 - DXGI captures the visible desktop: other windows can obscure game pixels.
 - Selects the monitor containing the game center; a window spanning displays captures only that monitor's intersection. Negative display coordinates are supported; rotated displays are explicitly unsupported.
 - A minimum 640 × 480 visible crop is required. HUD exclusion regions and size/color thresholds assume the usual game layout.
-- Short capture gaps preserve tracks for up to 350 ms. Hits observed fewer than three times are intentionally left unconfirmed.
+- Short capture gaps preserve tracks for up to 450 ms. Hits read fewer than three times are intentionally left unconfirmed.
+- Single digits are still misread at times, mostly on small or overlapping numbers, and an overlapped number can lose its last digit. The hit is counted; its value is off.
 - Neural OCR and Windows Graphics Capture are evaluation candidates, not active backends. Keep a recognizer replacement behind the same labeled replay contract and require measured improvements on held-out recordings before switching.

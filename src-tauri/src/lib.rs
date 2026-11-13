@@ -145,9 +145,14 @@ pub fn run() {
                 #[cfg(windows)]
                 if let Ok(hwnd) = window.hwnd() {
                     use windows::Win32::Foundation::HWND;
-                    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY};
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
+                    };
                     unsafe {
-                        let _ = SetWindowDisplayAffinity(HWND(hwnd.0 as _), WINDOW_DISPLAY_AFFINITY(17));
+                        let _ = SetWindowDisplayAffinity(
+                            HWND(hwnd.0 as _),
+                            WINDOW_DISPLAY_AFFINITY(17),
+                        );
                     }
                 }
             }
@@ -156,12 +161,12 @@ pub fn run() {
             thread::spawn(move || {
                 let mut capture = ScreenCapture::new();
                 let mut vision = match VisionEngine::try_new() {
-                    Ok(v) => {
-                        println!("[VisionEngine] Successfully initialized High-Precision Damage Vision Engine.");
-                        v
-                    }
+                    Ok(v) => v,
                     Err(e) => {
-                        eprintln!("[VisionEngine ERROR] Failed to initialize VisionEngine: {}", e);
+                        eprintln!(
+                            "[VisionEngine ERROR] Failed to initialize VisionEngine: {}",
+                            e
+                        );
                         return;
                     }
                 };
@@ -185,8 +190,12 @@ pub fn run() {
                     // Global F8 Hotkey check (works even when overlay or game is unfocused)
                     #[cfg(windows)]
                     {
-                        let f8_down = unsafe { (GetAsyncKeyState(VK_F8.0 as i32) as u16 & 0x8000) != 0 };
-                        if f8_down && !f8_was_down && last_f8_time.elapsed() >= Duration::from_millis(250) {
+                        let f8_down =
+                            unsafe { (GetAsyncKeyState(VK_F8.0 as i32) as u16 & 0x8000) != 0 };
+                        if f8_down
+                            && !f8_was_down
+                            && last_f8_time.elapsed() >= Duration::from_millis(250)
+                        {
                             last_f8_time = Instant::now();
                             if let Some(window) = app_handle.get_webview_window("main") {
                                 let mut s = state_clone.lock();
@@ -209,40 +218,46 @@ pub fn run() {
                         vision_generation = generation;
                     }
                     if is_active {
-                        match capture.capture() {
-                          CaptureOutcome::Frame(frame) => {
-                            if last_capture_status != "tracking" {
-                                let _ = app_handle.emit("capture-status", "tracking");
-                                last_capture_status = "tracking";
+                        let hits = match capture.capture() {
+                            CaptureOutcome::Frame(frame) => {
+                                if last_capture_status != "tracking" {
+                                    let _ = app_handle.emit("capture-status", "tracking");
+                                    last_capture_status = "tracking";
+                                }
+                                let observed_at = Instant::now();
+                                let analysis = vision.analyze_frame_at(&frame, observed_at);
+                                diagnostic_frames += 1;
+                                diagnostic_candidates += analysis.detections.len();
+                                diagnostic_ocr_ms += observed_at.elapsed().as_secs_f64() * 1000.0;
+                                diagnostic_size = (frame.width, frame.height);
+                                analysis.hits
                             }
-                            let observed_at = Instant::now();
-                            let analysis = vision.analyze_frame_at(&frame, observed_at);
-                            diagnostic_frames += 1;
-                            diagnostic_candidates += analysis.detections.len();
-                            diagnostic_hits += analysis.hits.len();
-                            diagnostic_ocr_ms += observed_at.elapsed().as_secs_f64() * 1000.0;
-                            diagnostic_size = (frame.width, frame.height);
-                            let hits = analysis.hits;
-                            if !hits.is_empty() {
-                                let mut s = state_clone.lock();
-                                // Reset/pause may have happened while OCR was running.
-                                if s.accepts_vision_generation(generation) {
+                            CaptureOutcome::NoNewFrame => vision.no_new_frame(Instant::now()),
+                            CaptureOutcome::Unavailable => {
+                                vision.reset();
+                                if last_capture_status != "unavailable" {
+                                    let _ = app_handle.emit("capture-status", "unavailable");
+                                    last_capture_status = "unavailable";
+                                }
+                                Vec::new()
+                            }
+                        };
+                        if !hits.is_empty() {
+                            diagnostic_hits += hits.len();
+                            let mut s = state_clone.lock();
+                            // Reset/pause may have happened while OCR was running.
+                            if s.accepts_vision_generation(generation) {
                                 for hit in hits {
-                                    println!("[Hit Detected] {} {:?} (crit: {}) at ({},{})", hit.value, hit.element, hit.is_crit, hit.x, hit.y);
-                                    let event = s.record_hit(hit.value, hit.element, hit.is_crit, hit.x, hit.y);
+                                    let event = s.record_hit(
+                                        hit.value,
+                                        hit.element,
+                                        hit.is_crit,
+                                        hit.x,
+                                        hit.y,
+                                    );
                                     let _ = app_handle.emit("damage-hit", &event);
                                 }
-                                }
                             }
-                          }
-                          CaptureOutcome::NoNewFrame => vision.no_new_frame(Instant::now()),
-                          CaptureOutcome::Unavailable => {
-                            vision.reset();
-                            if last_capture_status != "unavailable" {
-                                let _ = app_handle.emit("capture-status", "unavailable");
-                                last_capture_status = "unavailable";
-                            }
-                          }
                         }
                     } else {
                         vision.reset();
@@ -254,15 +269,22 @@ pub fn run() {
 
                     // Emit rolling stats update 4 times a second
                     if diagnostics_started.elapsed() >= Duration::from_secs(2) {
-                        let fps = f64::from(diagnostic_frames) / diagnostics_started.elapsed().as_secs_f64();
-                        let average_ms = if diagnostic_frames > 0 { diagnostic_ocr_ms / f64::from(diagnostic_frames) } else { 0.0 };
+                        let fps = f64::from(diagnostic_frames)
+                            / diagnostics_started.elapsed().as_secs_f64();
+                        let average_ms = if diagnostic_frames > 0 {
+                            diagnostic_ocr_ms / f64::from(diagnostic_frames)
+                        } else {
+                            0.0
+                        };
                         let diagnostics = serde_json::json!({
                             "status": last_capture_status, "fps": fps,
                             "width": diagnostic_size.0, "height": diagnostic_size.1,
                             "candidates": diagnostic_candidates, "hits": diagnostic_hits,
                             "processing_ms": average_ms,
                         });
-                        println!("[Capture diagnostics] {diagnostics}");
+                        if last_capture_status == "tracking" {
+                            println!("[Capture diagnostics] {diagnostics}");
+                        }
                         let _ = app_handle.emit("capture-diagnostics", &diagnostics);
                         diagnostics_started = Instant::now();
                         diagnostic_frames = 0;
@@ -279,10 +301,15 @@ pub fn run() {
                         last_stats_emit = Instant::now();
                     }
 
-                    // Maintain ~60 FPS or sleep when idle
-                    let elapsed = loop_start.elapsed();
-                    if elapsed < Duration::from_millis(16) {
-                        thread::sleep(Duration::from_millis(16) - elapsed);
+                    // While tracking, the capture call itself waits for the next
+                    // desktop frame. Sleeping on top of that would round up to the
+                    // system timer tick and halve the frame rate. Only idle states
+                    // need pacing.
+                    if last_capture_status != "tracking" {
+                        let elapsed = loop_start.elapsed();
+                        if elapsed < Duration::from_millis(16) {
+                            thread::sleep(Duration::from_millis(16) - elapsed);
+                        }
                     }
                 }
             });

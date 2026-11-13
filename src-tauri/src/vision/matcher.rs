@@ -342,9 +342,23 @@ pub const DIGIT_9_CRIT_SLANTED: [u8; 384] = [
     0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
 ];
 
+type Bits = [u64; 6];
+
+fn pack(template: &[u8; 384]) -> Bits {
+    let mut bits = [0u64; 6];
+    for (i, &p) in template.iter().enumerate() {
+        if p == 1 {
+            bits[i / 64] |= 1 << (i % 64);
+        }
+    }
+    bits
+}
+
 pub struct DigitTemplates {
     pub templates: [[u8; 384]; 10],
     pub alt_templates: [Vec<[u8; 384]>; 10],
+    /// Bit-packed main and alternate templates per digit for popcount scoring.
+    packed: [Vec<Bits>; 10],
 }
 
 impl DigitTemplates {
@@ -363,12 +377,20 @@ impl DigitTemplates {
         alt_templates[9].push(DIGIT_9_CRIT);
         alt_templates[9].push(DIGIT_9_CRIT_SLANTED);
 
+        let templates = [
+            DIGIT_0, DIGIT_1, DIGIT_2, DIGIT_3, DIGIT_4, DIGIT_5, DIGIT_6, DIGIT_7, DIGIT_8,
+            DIGIT_9,
+        ];
+        let packed = std::array::from_fn(|digit| {
+            std::iter::once(&templates[digit])
+                .chain(&alt_templates[digit])
+                .map(pack)
+                .collect()
+        });
         Self {
-            templates: [
-                DIGIT_0, DIGIT_1, DIGIT_2, DIGIT_3, DIGIT_4, DIGIT_5, DIGIT_6, DIGIT_7, DIGIT_8,
-                DIGIT_9,
-            ],
+            templates,
             alt_templates,
+            packed,
         }
     }
 
@@ -397,12 +419,11 @@ impl DigitTemplates {
         let mut best_digit = 0;
         let mut best_score = -1.0f32;
 
-        for (digit, t) in self.templates.iter().enumerate() {
-            let mut score = Self::calc_iou(&normalized, t);
-
-            for alt in &self.alt_templates[digit] {
-                let alt_score = Self::calc_iou(&normalized, alt);
-                score = score.max(alt_score);
+        let bits = pack(&normalized);
+        for (digit, variants) in self.packed.iter().enumerate() {
+            let mut score = 0.0f32;
+            for variant in variants {
+                score = score.max(Self::calc_iou(&bits, variant));
             }
 
             let raw_score = score;
@@ -437,6 +458,14 @@ impl DigitTemplates {
                 if upper_hole_ones >= 6 || lower_hole_ones >= 10 {
                     score -= 0.40;
                 }
+                // An 8 is closed on the left from top to bottom. A 3 is open
+                // there between its two bowls, however similar the rest is.
+                let open_left_rows = (8..16)
+                    .filter(|ty| (0..5).all(|tx| normalized[ty * TEMPLATE_W + tx] == 0))
+                    .count();
+                if open_left_rows >= 4 {
+                    score -= 0.40;
+                }
                 if aspect <= 0.38 {
                     score -= 0.30;
                 }
@@ -455,27 +484,56 @@ impl DigitTemplates {
         (best_digit, best_score)
     }
 
-    fn calc_iou(norm: &[u8; 384], t: &[u8; 384]) -> f32 {
-        let mut match_count = 0usize;
-        let mut total_count = 0usize;
-
-        for i in 0..norm.len() {
-            let p1 = norm[i] == 1;
-            let p2 = t[i] == 1;
-            if p1 || p2 {
-                total_count += 1;
-                if p1 == p2 {
-                    match_count += 1;
-                }
-            }
+    fn calc_iou(a: &Bits, b: &Bits) -> f32 {
+        let mut both = 0u32;
+        let mut either = 0u32;
+        for (x, y) in a.iter().zip(b) {
+            both += (x & y).count_ones();
+            either += (x | y).count_ones();
         }
-
-        if total_count > 0 {
-            match_count as f32 / total_count as f32
+        if either > 0 {
+            both as f32 / either as f32
         } else {
             0.0
         }
     }
+}
+
+/// Drop leading and trailing columns that hold only a sliver of the glyph's
+/// height: a hairline of same-colored scenery, never a digit's own edge.
+fn trim_side_spurs(mask: Vec<u8>, w: usize, h: usize) -> (Vec<u8>, usize, usize) {
+    if w < 6 || h < 12 || mask.len() < w * h {
+        return (mask, w, h);
+    }
+    let limit = (h as f32 * 0.07) as usize;
+    let column = |x: usize| (0..h).filter(|&y| mask[y * w + x] > 0).count();
+    let mut left = 0;
+    while left < w / 2 && column(left) <= limit {
+        left += 1;
+    }
+    let mut right = w;
+    while right > left + w / 2 && column(right - 1) <= limit {
+        right -= 1;
+    }
+    if left == 0 && right == w {
+        return (mask, w, h);
+    }
+    // Re-tighten vertically: the spur may have been the only pixel in a row.
+    let filled = |y: usize| (left..right).any(|x| mask[y * w + x] > 0);
+    let Some(top) = (0..h).find(|&y| filled(y)) else {
+        return (mask, w, h);
+    };
+    let bottom = (0..h).rfind(|&y| filled(y)).unwrap_or(top) + 1;
+    let mut trimmed = Vec::with_capacity((right - left) * (bottom - top));
+    for y in top..bottom {
+        trimmed.extend_from_slice(&mask[y * w + left..y * w + right]);
+    }
+    (trimmed, right - left, bottom - top)
+}
+
+fn shared_templates() -> &'static DigitTemplates {
+    static TEMPLATES: std::sync::OnceLock<DigitTemplates> = std::sync::OnceLock::new();
+    TEMPLATES.get_or_init(DigitTemplates::new)
 }
 
 pub struct DigitMatcher {
@@ -489,7 +547,7 @@ impl DigitMatcher {
         mut comps: Vec<DetectedComponent>,
         scale: f32,
     ) -> Vec<DetectedComponent> {
-        let templates = DigitTemplates::new();
+        let templates = shared_templates();
         comps.sort_by_key(|c| c.bbox.y);
         let mut used = vec![false; comps.len()];
         let mut result = Vec::with_capacity(comps.len());
@@ -566,9 +624,7 @@ impl DigitMatcher {
     pub(crate) fn split_number_component(
         comp: &DetectedComponent,
     ) -> Option<Vec<DetectedComponent>> {
-        use std::sync::OnceLock;
-        static TEMPLATES: OnceLock<DigitTemplates> = OnceLock::new();
-        let templates = TEMPLATES.get_or_init(DigitTemplates::new);
+        let templates = shared_templates();
         let w = comp.bbox.width as usize;
         let h = comp.bbox.height as usize;
         let mut columns = vec![0usize; w];
@@ -889,6 +945,10 @@ impl DigitMatcher {
                     g.bbox.height as usize,
                 )
             };
+
+            // Scenery lines of the text's own color stick out sideways from a
+            // glyph and stretch its box; cut them off before matching.
+            let (crop_mask, gw, gh) = trim_side_spurs(crop_mask, gw, gh);
 
             // Check for critical exclamation mark: narrow, tall with gap before bottom dot
             let aspect = gw as f32 / gh as f32;

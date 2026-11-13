@@ -45,7 +45,13 @@ pub struct DamageEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CombatStats {
+    /// Damage per second over the last five seconds.
     pub dps: u32,
+    /// Highest five-second DPS reached this session.
+    pub peak_dps: u32,
+    /// Total damage over the time spent fighting (idle gaps excluded).
+    pub avg_dps: u32,
+    pub combat_secs: f32,
     pub peak_hit: u32,
     pub peak_element: ElementType,
     pub total_damage: u64,
@@ -55,6 +61,10 @@ pub struct CombatStats {
     pub elemental_breakdown: HashMap<ElementType, u64>,
     pub recent_hits: Vec<DamageEvent>,
 }
+
+const DPS_WINDOW: Duration = Duration::from_secs(5);
+/// Longer than this without a hit ends a fight for the average-DPS clock.
+const IDLE_GAP: Duration = Duration::from_secs(5);
 
 pub struct HitRecord {
     pub instant: Instant,
@@ -70,6 +80,10 @@ pub struct AppState {
     pub peak_hit: u32,
     pub peak_element: ElementType,
     pub elemental_breakdown: HashMap<ElementType, u64>,
+    pub peak_dps: u32,
+    /// Seconds spent in combat: gaps between hits of up to five seconds.
+    pub combat_secs: f32,
+    pub last_hit: Option<Instant>,
     pub capture_active: bool,
     pub click_through: bool,
     /// Invalidates pending vision work across session resets and capture changes.
@@ -87,6 +101,9 @@ impl AppState {
             peak_hit: 0,
             peak_element: ElementType::Physical,
             elemental_breakdown: HashMap::new(),
+            peak_dps: 0,
+            combat_secs: 0.0,
+            last_hit: None,
             capture_active: true,
             click_through: false,
             vision_generation: 0,
@@ -138,6 +155,16 @@ impl AppState {
             event: event.clone(),
         });
 
+        // A lone hit, or the first after a pause, counts as one second of combat.
+        self.combat_secs += match self.last_hit {
+            Some(last) if now.duration_since(last) <= IDLE_GAP => {
+                now.duration_since(last).as_secs_f32()
+            }
+            _ => 1.0,
+        };
+        self.last_hit = Some(now);
+        self.peak_dps = self.peak_dps.max(self.window_dps(now));
+
         // Prune older than 30 seconds
         let cutoff = now.checked_sub(Duration::from_secs(30)).unwrap_or(now);
         while let Some(front) = self.hit_history.front() {
@@ -151,23 +178,25 @@ impl AppState {
         event
     }
 
+    fn window_dps(&self, now: Instant) -> u32 {
+        let cutoff = now.checked_sub(DPS_WINDOW).unwrap_or(now);
+        let damage: u64 = self
+            .hit_history
+            .iter()
+            .rev()
+            .take_while(|record| record.instant >= cutoff)
+            .map(|record| u64::from(record.event.value))
+            .sum();
+        (damage as f32 / DPS_WINDOW.as_secs_f32()).round() as u32
+    }
+
     pub fn compute_stats(&self) -> CombatStats {
-        let now = Instant::now();
-        let window_secs = 5.0f32;
-        let dps_cutoff = now
-            .checked_sub(Duration::from_secs_f32(window_secs))
-            .unwrap_or(now);
-
-        let mut window_damage = 0u64;
-        for record in self.hit_history.iter().rev() {
-            if record.instant >= dps_cutoff {
-                window_damage += record.event.value as u64;
-            } else {
-                break;
-            }
-        }
-
-        let dps = (window_damage as f32 / window_secs).round() as u32;
+        let dps = self.window_dps(Instant::now());
+        let avg_dps = if self.combat_secs > 0.0 {
+            (self.total_damage as f64 / f64::from(self.combat_secs.max(1.0))).round() as u32
+        } else {
+            0
+        };
 
         let crit_rate_pct = if self.total_hits > 0 {
             (self.crit_hits as f32 / self.total_hits as f32) * 100.0
@@ -185,6 +214,9 @@ impl AppState {
 
         CombatStats {
             dps,
+            peak_dps: self.peak_dps.max(dps),
+            avg_dps,
+            combat_secs: self.combat_secs,
             peak_hit: self.peak_hit,
             peak_element: self.peak_element,
             total_damage: self.total_damage,
@@ -205,6 +237,9 @@ impl AppState {
         self.peak_hit = 0;
         self.peak_element = ElementType::Physical;
         self.elemental_breakdown.clear();
+        self.peak_dps = 0;
+        self.combat_secs = 0.0;
+        self.last_hit = None;
     }
 
     pub fn set_capture_active(&mut self, enabled: bool) {
@@ -258,6 +293,11 @@ mod tests {
         assert_eq!(stats.peak_hit, 85_000);
         assert_eq!(stats.peak_element, ElementType::Hydro);
         assert_eq!(stats.recent_hits.len(), 2);
+        // Two hits moments apart: about one second of combat.
+        assert!((1.0..1.5).contains(&stats.combat_secs));
+        assert!((64_000..=97_000).contains(&stats.avg_dps));
+        assert_eq!(stats.dps, 19_400);
+        assert_eq!(stats.peak_dps, 19_400);
         assert_eq!(
             *stats.elemental_breakdown.get(&ElementType::Pyro).unwrap(),
             12_000
@@ -266,5 +306,8 @@ mod tests {
             *stats.elemental_breakdown.get(&ElementType::Hydro).unwrap(),
             85_000
         );
+        state.reset();
+        let stats = state.compute_stats();
+        assert_eq!((stats.avg_dps, stats.peak_dps, stats.total_hits), (0, 0, 0));
     }
 }

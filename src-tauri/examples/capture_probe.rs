@@ -71,7 +71,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             CaptureOutcome::NoNewFrame => {
                 no_frame += 1;
-                vision.no_new_frame(Instant::now());
+                // A number that just vanished can still confirm here.
+                let now = Instant::now();
+                for hit in vision.no_new_frame(now) {
+                    confirmed += 1;
+                    confirmed_events.push(serde_json::json!({
+                        "timestamp_ms": now.duration_since(started).as_millis() as u64,
+                        "value": hit.value, "element": hit.element,
+                    }));
+                }
             }
             CaptureOutcome::Unavailable => {
                 unavailable += 1;

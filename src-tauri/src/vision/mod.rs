@@ -82,12 +82,18 @@ impl VisionEngine {
         frame_detections
     }
 
-    pub fn no_new_frame(&mut self, now: Instant) {
-        self.tracker.advance_time(now);
+    /// No new pixels: age the tracks. A number that just vanished may confirm.
+    pub fn no_new_frame(&mut self, now: Instant) -> Vec<ConfirmedHit> {
+        self.tracker.advance_time(now)
     }
 
     pub fn reset(&mut self) {
         self.tracker.reset();
+    }
+
+    /// Print tracks that end unconfirmed, to diagnose missed hits.
+    pub fn set_trace(&mut self, enabled: bool) {
+        self.tracker.trace = enabled;
     }
 }
 

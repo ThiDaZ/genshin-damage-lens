@@ -1,346 +1,389 @@
-// GenshinDamageLens - Frontend Event Controller & Visualizer
+// GenshinDamageLens overlay: renders session stats pushed by the capture backend.
 
-// Tauri API Access
 const tauri = window.__TAURI__ || null;
 const invoke = tauri ? tauri.core.invoke : null;
 const listen = tauri ? tauri.event.listen : null;
 
-// DOM Elements
-const dpsDisplay = document.getElementById("dps-display");
-const dpsFill = document.getElementById("dps-fill");
-const peakCard = document.getElementById("peak-card");
-const peakDisplay = document.getElementById("peak-display");
-const peakElementBadge = document.getElementById("peak-element-badge");
-const peakMetaText = document.getElementById("peak-meta-text");
-const critRateDisplay = document.getElementById("crit-rate-display");
-const totalDamageDisplay = document.getElementById("total-damage-display");
-const totalHitsDisplay = document.getElementById("total-hits-display");
-const elementalBar = document.getElementById("elemental-bar");
-const hitTickerList = document.getElementById("hit-ticker-list");
-const feedCount = document.getElementById("feed-count");
-const damageLayer = document.getElementById("damage-layer");
-const hudContainer = document.getElementById("hud-container");
+const $ = (id) => document.getElementById(id);
+const panel = $("panel");
 
-const btnClickthrough = document.getElementById("btn-clickthrough");
-const modeIcon = document.getElementById("mode-icon");
-const modeLabel = document.getElementById("mode-label");
-const btnSimulate = document.getElementById("btn-simulate");
-const btnAutoSim = document.getElementById("btn-auto-sim");
-const btnReset = document.getElementById("btn-reset");
-const btnCollapse = document.getElementById("btn-collapse");
-const collapseIcon = document.getElementById("collapse-icon");
+const ELEMENTS = ["pyro", "hydro", "cryo", "electro", "dendro", "anemo", "geo", "physical"];
+const FEED_ROWS = 7;
+const SPARK_SAMPLES = 120; // stats arrive four times a second: 30 s of history
+const STORE_KEY = "gdl.panel";
 
-// State
-let isPassthrough = false;
-let isAutoSimulating = false;
-let autoSimInterval = null;
-let isCollapsed = false;
-
-// Format numbers nicely (e.g. 1,420,500 or 1.42M)
-function formatNumber(num) {
-  return num.toLocaleString();
-}
-
-function formatCompact(num) {
-  if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(2) + "B";
-  if (num >= 1_000_000) return (num / 1_000_000).toFixed(2) + "M";
-  if (num >= 1_000) return (num / 1_000).toFixed(1) + "K";
-  return num.toString();
-}
-
-// Spawning floating damage numbers on screen is disabled during capture
-// to keep combat view clean and prevent DXGI desktop screen-capture feedback loops
-function spawnFloatingHit(_event) {
-  // Intentionally no-op: Genshin renders its own floating numbers in-game.
-  // The overlay displays combat metrics in the HUD and combat feed.
-}
-
-// Append hit to recent ticker
-function addHitToTicker(event) {
-  // Remove empty placeholder
-  const hint = hitTickerList.querySelector(".empty-feed-hint");
-  if (hint) hint.remove();
-
-  const item = document.createElement("div");
-  item.className = `feed-item ${event.element}`;
-  item.innerHTML = `
-    <div class="feed-left">
-      <span class="feed-badge">${event.element}</span>
-      ${event.is_crit ? '<span class="feed-crit-tag">CRIT</span>' : ""}
-    </div>
-    <span class="feed-value">${event.value.toLocaleString()}</span>
-  `;
-
-  hitTickerList.prepend(item);
-
-  // Keep max 6 items
-  while (hitTickerList.children.length > 6) {
-    hitTickerList.lastElementChild.remove();
-  }
-
-  feedCount.textContent = `${hitTickerList.children.length} recent`;
-}
-
-// Update UI from CombatStats
-function updateCombatStats(stats) {
-  // 1. DPS
-  dpsDisplay.textContent = formatNumber(stats.dps);
-  const fillPct = Math.min(100, (stats.dps / 150_000) * 100);
-  dpsFill.style.width = `${fillPct}%`;
-
-  // 2. Peak Hit
-  if (stats.peak_hit > 0) {
-    peakDisplay.textContent = formatNumber(stats.peak_hit);
-    peakElementBadge.textContent = stats.peak_element.toUpperCase();
-    peakMetaText.textContent = `Elemental Peak Damage`;
-
-    // Remove old element classes and set new one
-    peakCard.className = `hud-card peak-card ${stats.peak_element}`;
-  } else {
-    peakDisplay.textContent = "0";
-    peakElementBadge.textContent = "PHYSICAL";
-    peakCard.className = "hud-card peak-card";
-    peakMetaText.textContent = "No combat data yet";
-  }
-
-  // 3. Stats Grid
-  critRateDisplay.textContent = `CRIT ${stats.crit_rate_pct.toFixed(1)}%`;
-  totalDamageDisplay.textContent = formatCompact(stats.total_damage);
-  totalHitsDisplay.textContent = stats.total_hits.toLocaleString();
-
-  // 4. Elemental Breakdown Bar
-  renderElementalBar(stats.elemental_breakdown, stats.total_damage);
-}
-
-// Render stacked elemental distribution
-function renderElementalBar(breakdown, total) {
-  elementalBar.innerHTML = "";
-  if (!breakdown || total === 0) {
-    elementalBar.innerHTML = '<div class="elem-segment physical" style="width: 100%"></div>';
-    return;
-  }
-
-  for (const [element, amount] of Object.entries(breakdown)) {
-    const pct = ((amount / total) * 100).toFixed(1);
-    if (pct > 0) {
-      const seg = document.createElement("div");
-      seg.className = `elem-segment ${element.toLowerCase()}`;
-      seg.style.width = `${pct}%`;
-      seg.title = `${element.toUpperCase()}: ${pct}% (${formatCompact(amount)})`;
-      elementalBar.appendChild(seg);
-    }
-  }
-}
-
-// Setup Event Listeners
-async function setupEventListeners() {
-  if (listen) {
-    // Listen to real-time damage hit
-    await listen("damage-hit", (event) => {
-      addHitToTicker(event.payload);
-    });
-
-    // Listen to rolling combat stats
-    await listen("combat-stats", (event) => {
-      updateCombatStats(event.payload);
-    });
-
-    // Listen to global clickthrough toggle (from backend F8 hotkey when unfocused)
-    await listen("clickthrough-toggled", (event) => {
-      isPassthrough = Boolean(event.payload);
-      applyClickthroughUI(isPassthrough);
-    });
-
-    await listen("capture-status", (event) => {
-      const status = event.payload;
-      const badge = document.getElementById("capture-badge");
-      const dot = document.getElementById("engine-status-dot");
-      badge.textContent = status === "tracking" ? "TRACKING" : status === "paused" ? "PAUSED" : "WAITING FOR GAME";
-      dot.style.background = status === "tracking" ? "#10b981" : "#f59e0b";
-      dot.style.animationPlayState = status === "tracking" ? "running" : "paused";
-    });
-
-    await listen("capture-diagnostics", (event) => {
-      const d = event.payload;
-      const details = document.getElementById("capture-details");
-      if (d.status === "tracking") {
-        details.textContent = `${d.width}×${d.height} · ${d.fps.toFixed(1)} FPS · ${d.candidates} readings · ${d.hits} confirmed / 2s`;
-        details.title = `Average recognition: ${d.processing_ms.toFixed(1)} ms. Readings are OCR candidates before motion and confidence checks.`;
-      } else {
-        details.textContent = d.status === "paused" ? "Capture paused" : "Game capture unavailable";
-        details.title = "";
-      }
-    });
-  }
-
-  // Toggle Click-Through mode
-  btnClickthrough.addEventListener("click", toggleClickthrough);
-
-  // When running in a standard web browser outside Tauri, use local keydown
-  if (!listen) {
-    window.addEventListener("keydown", (e) => {
-      if (e.key === "F8") {
-        toggleClickthrough();
-      }
-    });
-  }
-
-  // Trigger test hit
-  btnSimulate.addEventListener("click", async () => {
-    if (invoke) {
-      await invoke("simulate_hit", { element: null, isCrit: null });
-    } else {
-      mockSimulationHit();
-    }
-  });
-
-  // Toggle auto simulation loop
-  btnAutoSim.addEventListener("click", () => {
-    isAutoSimulating = !isAutoSimulating;
-    if (isAutoSimulating) {
-      btnAutoSim.style.background = "rgba(16, 185, 129, 0.3)";
-      btnAutoSim.style.borderColor = "#10b981";
-      autoSimInterval = setInterval(async () => {
-        if (invoke) {
-          await invoke("simulate_hit", { element: null, isCrit: null });
-        } else {
-          mockSimulationHit();
-        }
-      }, 750);
-    } else {
-      btnAutoSim.style.background = "";
-      btnAutoSim.style.borderColor = "";
-      clearInterval(autoSimInterval);
-      autoSimInterval = null;
-    }
-  });
-
-  // Reset stats
-  btnReset.addEventListener("click", async () => {
-    if (invoke) {
-      const stats = await invoke("reset_stats");
-      updateCombatStats(stats);
-      hitTickerList.innerHTML = '<div class="empty-feed-hint">Waiting for combat damage...</div>';
-      feedCount.textContent = "0 hits";
-    } else {
-      mockReset();
-    }
-  });
-
-  // Collapse / Minimize
-  btnCollapse.addEventListener("click", () => {
-    isCollapsed = !isCollapsed;
-    hudContainer.classList.toggle("collapsed", isCollapsed);
-    collapseIcon.textContent = isCollapsed ? "➕" : "➖";
-  });
-}
-
-function applyClickthroughUI(passthrough) {
-  if (passthrough) {
-    btnClickthrough.classList.add("passthrough");
-    modeIcon.textContent = "🛡️";
-    modeLabel.textContent = "Passthrough (F8)";
-  } else {
-    btnClickthrough.classList.remove("passthrough");
-    modeIcon.textContent = "🖱️";
-    modeLabel.textContent = "Interactive";
-  }
-}
-
-// Toggle Passthrough
-async function toggleClickthrough() {
-  isPassthrough = !isPassthrough;
-  applyClickthroughUI(isPassthrough);
-
-  if (invoke) {
-    try {
-      await invoke("toggle_click_through", { ignore: isPassthrough });
-    } catch (err) {
-      isPassthrough = !isPassthrough;
-      applyClickthroughUI(isPassthrough);
-      console.warn("Could not set click-through:", err);
-    }
-  }
-}
-
-// Browser Mock Simulation (for standalone testing outside Tauri)
-let mockStats = {
-  dps: 0,
-  peak_hit: 0,
-  peak_element: "pyro",
-  total_damage: 0,
-  total_hits: 0,
-  crit_hits: 0,
-  crit_rate_pct: 0,
-  elemental_breakdown: {},
+const view = {
+  passthrough: false,
+  paused: false,
+  status: "unavailable",
+  demo: null,
+  spark: [],
+  seenHits: new Set(),
+  lastHits: [],
 };
 
-function mockSimulationHit() {
-  const elements = ["pyro", "hydro", "cryo", "electro", "dendro", "anemo", "geo", "physical"];
-  const elem = elements[Math.floor(Math.random() * elements.length)];
-  const isCrit = Math.random() < 0.65;
-  const value = isCrit
-    ? Math.floor(35000 + Math.random() * 120000)
-    : Math.floor(5000 + Math.random() * 20000);
+// ── Formatting ────────────────────────────────────────────────────────
+const whole = (n) => Math.round(n).toLocaleString("en-US");
 
-  const event = {
-    id: Date.now(),
-    timestamp_ms: Date.now(),
-    value,
-    element: elem,
-    is_crit: isCrit,
-    x: 0,
-    y: 0,
-  };
-
-  mockStats.total_damage += value;
-  mockStats.total_hits += 1;
-  if (isCrit) mockStats.crit_hits += 1;
-  mockStats.crit_rate_pct = (mockStats.crit_hits / mockStats.total_hits) * 100;
-  mockStats.dps = Math.floor(mockStats.dps * 0.7 + value * 0.3);
-
-  if (value > mockStats.peak_hit) {
-    mockStats.peak_hit = value;
-    mockStats.peak_element = elem;
-  }
-
-  mockStats.elemental_breakdown[elem] = (mockStats.elemental_breakdown[elem] || 0) + value;
-
-  addHitToTicker(event);
-  updateCombatStats(mockStats);
+function compact(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e4) return (n / 1e3).toFixed(1) + "K";
+  return whole(n);
 }
 
-function mockReset() {
-  mockStats = {
-    dps: 0,
-    peak_hit: 0,
-    peak_element: "physical",
-    total_damage: 0,
-    total_hits: 0,
-    crit_hits: 0,
-    crit_rate_pct: 0,
-    elemental_breakdown: {},
-  };
-  updateCombatStats(mockStats);
-  hitTickerList.innerHTML = '<div class="empty-feed-hint">Waiting for combat damage...</div>';
-  feedCount.textContent = "0 hits";
+function age(ms) {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m`;
 }
 
-// Initialize on Load
-window.addEventListener("DOMContentLoaded", async () => {
-  await setupEventListeners();
-  if (!invoke) {
-    document.getElementById("capture-badge").textContent = "DEMO PREVIEW";
-    document.getElementById("capture-details").textContent = "Demo preview — no game capture";
-  }
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
 
-  // Initial fetch from backend
+// ── Rendering ─────────────────────────────────────────────────────────
+function renderStats(stats) {
+  $("dps-display").textContent = whole(stats.dps);
+  panel.dataset.idle = String(stats.dps === 0);
+  $("total-damage-display").textContent = compact(stats.total_damage);
+  $("avg-dps-display").textContent = compact(stats.avg_dps);
+  $("total-hits-display").textContent = whole(stats.total_hits);
+  $("crit-rate-display").textContent = `${Math.round(stats.crit_rate_pct)}%`;
+
+  const hasPeak = stats.peak_hit > 0;
+  $("peak-display").textContent = hasPeak ? whole(stats.peak_hit) : "–";
+  const badge = $("peak-element-badge");
+  badge.hidden = !hasPeak;
+  badge.className = `chip ${stats.peak_element}`;
+  badge.textContent = stats.peak_element;
+  $("peak-dps-display").textContent = stats.peak_dps > 0 ? whole(stats.peak_dps) : "–";
+
+  renderElements(stats.elemental_breakdown || {}, stats.total_damage);
+  renderFeed(stats.recent_hits || []);
+  renderSpark(stats.dps);
+}
+
+function renderElements(breakdown, total) {
+  const bar = $("elemental-bar");
+  const legend = $("element-legend");
+  const rows = Object.entries(breakdown)
+    .filter(([, amount]) => amount > 0)
+    .sort((a, b) => b[1] - a[1]);
+  bar.replaceChildren();
+  legend.replaceChildren();
+  if (!rows.length || !total) {
+    legend.append(el("div", "empty", "No damage recorded yet."));
+    return;
+  }
+  for (const [element, amount] of rows) {
+    const share = amount / total;
+    const seg = el("div", `stack-seg ${element}`);
+    seg.style.flexGrow = String(amount);
+    seg.title = `${element}: ${whole(amount)}`;
+    bar.append(seg);
+
+    const row = el("div", `legend-row ${element}`);
+    row.title = whole(amount);
+    row.append(
+      el("span", "dot"),
+      el("span", "name", element),
+      el("span", "pct", share >= 0.995 ? "100%" : `${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`),
+    );
+    legend.append(row);
+  }
+}
+
+function renderFeed(hits) {
+  view.lastHits = hits;
+  const list = $("hit-ticker-list");
+  if (!hits.length) {
+    list.replaceChildren(
+      el("div", "empty", "Hits appear here about half a second after the number shows in game."),
+    );
+    $("feed-count").textContent = "";
+    view.seenHits.clear();
+    return;
+  }
+  const rows = hits.slice(0, FEED_ROWS).map((hit) => {
+    const row = el("div", `hit ${hit.element}`);
+    if (!view.seenHits.has(hit.id)) row.classList.add("fresh");
+    row.append(el("span", "dot"), el("span", "name", hit.element));
+    if (hit.is_crit) row.append(el("span", "crit", "CRIT"));
+    row.append(el("span", "value", whole(hit.value)), el("span", "age", age(hit.timestamp_ms)));
+    return row;
+  });
+  view.seenHits = new Set(hits.map((hit) => hit.id));
+  list.replaceChildren(...rows);
+  $("feed-count").textContent = `last ${rows.length}`;
+}
+
+function renderSpark(dps) {
+  view.spark.push(dps);
+  if (view.spark.length > SPARK_SAMPLES) view.spark.shift();
+  const max = Math.max(...view.spark);
+  if (max <= 0) {
+    $("spark-line").setAttribute("d", "");
+    $("spark-area").setAttribute("d", "");
+    return;
+  }
+  const step = 120 / (SPARK_SAMPLES - 1);
+  const offset = SPARK_SAMPLES - view.spark.length;
+  const points = view.spark.map((value, i) => {
+    const x = ((offset + i) * step).toFixed(1);
+    const y = (38 - (value / max) * 34).toFixed(1);
+    return `${x},${y}`;
+  });
+  const line = `M${points.join("L")}`;
+  $("spark-line").setAttribute("d", line);
+  $("spark-area").setAttribute("d", `${line}L120,40L${(offset * step).toFixed(1)},40Z`);
+}
+
+function renderStatus(status) {
+  view.status = status;
+  panel.dataset.status = status;
+  const text = { tracking: "Tracking", paused: "Paused", unavailable: "Waiting for game" };
+  $("status-text").textContent = text[status] || "Waiting for game";
+  view.paused = status === "paused";
+  $("icon-pause").toggleAttribute("hidden", view.paused);
+  $("icon-play").toggleAttribute("hidden", !view.paused);
+  $("btn-pause").title = view.paused ? "Resume capture" : "Pause capture";
+  if (status !== "tracking") {
+    $("capture-details").textContent =
+      status === "paused" ? "Capture paused" : "Genshin Impact window not found";
+  }
+}
+
+function renderDiagnostics(d) {
+  if (d.status !== "tracking") return;
+  $("status-text").textContent = `Tracking · ${Math.round(d.fps)} fps`;
+  $("capture-details").textContent =
+    `${d.width}×${d.height} · ${d.processing_ms.toFixed(1)} ms per frame · ` +
+    `${d.hits} hits / ${d.candidates} readings`;
+  $("capture-details").title =
+    "Readings are single-frame number sightings. A hit is one number confirmed across frames.";
+}
+
+function renderPassthrough(on) {
+  view.passthrough = on;
+  document.body.classList.toggle("passthrough", on);
+  closeMenu();
+}
+
+// ── Actions ───────────────────────────────────────────────────────────
+async function setPassthrough(on) {
+  renderPassthrough(on);
+  if (!invoke) return;
+  try {
+    await invoke("toggle_click_through", { ignore: on });
+  } catch (error) {
+    renderPassthrough(!on);
+    console.warn("Could not change click-through:", error);
+  }
+}
+
+async function togglePause() {
+  const resume = view.paused;
   if (invoke) {
-    try {
-      const stats = await invoke("get_combat_stats");
-      updateCombatStats(stats);
-    } catch (e) {
-      console.error("Failed to load initial combat stats:", e);
-    }
+    await invoke("set_capture_active", { enabled: resume });
+  } else {
+    renderStatus(resume ? "tracking" : "paused");
   }
-});
+}
+
+async function reset() {
+  view.spark = [];
+  view.seenHits.clear();
+  if (invoke) {
+    renderStats(await invoke("reset_stats"));
+  } else {
+    mock.reset();
+  }
+}
+
+async function testHit() {
+  if (invoke) {
+    await invoke("simulate_hit", { element: null, isCrit: null });
+  } else {
+    mock.hit();
+  }
+}
+
+function toggleDemo() {
+  const button = $("btn-auto-sim");
+  if (view.demo) {
+    clearInterval(view.demo);
+    view.demo = null;
+  } else {
+    view.demo = setInterval(testHit, 450);
+  }
+  button.classList.toggle("on", Boolean(view.demo));
+}
+
+function closeMenu() {
+  $("menu").hidden = true;
+  $("btn-more").setAttribute("aria-expanded", "false");
+}
+
+function toggleMenu() {
+  const open = $("menu").hidden;
+  $("menu").hidden = !open;
+  $("btn-more").setAttribute("aria-expanded", String(open));
+}
+
+function setCompact(on) {
+  document.body.classList.toggle("compact", on);
+  $("btn-compact").classList.toggle("on", on);
+  $("btn-compact").title = on ? "Full view" : "Compact view";
+  savePlacement({ compact: on });
+}
+
+// ── Placement: drag by the title bar, remembered between runs ─────────
+function loadPlacement() {
+  try {
+    return JSON.parse(localStorage.getItem(STORE_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function savePlacement(change) {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({ ...loadPlacement(), ...change }));
+  } catch {
+    // Placement is a convenience; the default spot still works.
+  }
+}
+
+function placePanel(left, top) {
+  const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+  const maxTop = Math.max(0, window.innerHeight - 60);
+  panel.style.left = `${Math.min(Math.max(0, left), maxLeft)}px`;
+  panel.style.top = `${Math.min(Math.max(0, top), maxTop)}px`;
+}
+
+function setupDrag() {
+  const handle = $("drag-handle");
+  let grab = null;
+  handle.addEventListener("pointerdown", (event) => {
+    if (view.passthrough || event.button !== 0 || event.target.closest("button, .menu")) return;
+    const box = panel.getBoundingClientRect();
+    grab = { dx: event.clientX - box.left, dy: event.clientY - box.top };
+    handle.setPointerCapture(event.pointerId);
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (grab) placePanel(event.clientX - grab.dx, event.clientY - grab.dy);
+  });
+  const release = () => {
+    if (!grab) return;
+    grab = null;
+    const box = panel.getBoundingClientRect();
+    savePlacement({ left: Math.round(box.left), top: Math.round(box.top) });
+  };
+  handle.addEventListener("pointerup", release);
+  handle.addEventListener("pointercancel", release);
+}
+
+function recenter() {
+  panel.style.left = "";
+  panel.style.top = "";
+  savePlacement({ left: undefined, top: undefined });
+  closeMenu();
+}
+
+// ── Browser preview without the backend ───────────────────────────────
+const mock = {
+  hits: [],
+  stats: null,
+  reset() {
+    this.hits = [];
+    this.stats = {
+      dps: 0, peak_dps: 0, avg_dps: 0, combat_secs: 0, peak_hit: 0, peak_element: "physical",
+      total_damage: 0, total_hits: 0, crit_hits: 0, crit_rate_pct: 0,
+      elemental_breakdown: {}, recent_hits: [],
+    };
+    renderStats(this.stats);
+  },
+  hit() {
+    const s = this.stats;
+    const element = ELEMENTS[Math.floor(Math.random() ** 2 * ELEMENTS.length)];
+    const is_crit = Math.random() < 0.6;
+    const value = Math.floor(is_crit ? 9000 + Math.random() * 30000 : 1500 + Math.random() * 6000);
+    const now = Date.now();
+    const last = this.hits[0];
+    s.combat_secs += last && now - last.timestamp_ms <= 5000 ? (now - last.timestamp_ms) / 1000 : 1;
+    this.hits.unshift({ id: now + Math.random(), timestamp_ms: now, value, element, is_crit });
+    this.hits.length = Math.min(this.hits.length, 200);
+    s.total_damage += value;
+    s.total_hits += 1;
+    s.crit_hits += is_crit ? 1 : 0;
+    s.crit_rate_pct = (s.crit_hits / s.total_hits) * 100;
+    s.avg_dps = Math.round(s.total_damage / Math.max(1, s.combat_secs));
+    if (value > s.peak_hit) [s.peak_hit, s.peak_element] = [value, element];
+    s.elemental_breakdown[element] = (s.elemental_breakdown[element] || 0) + value;
+    this.tick();
+  },
+  tick() {
+    const s = this.stats;
+    const cutoff = Date.now() - 5000;
+    const windowDamage = this.hits
+      .filter((hit) => hit.timestamp_ms >= cutoff)
+      .reduce((sum, hit) => sum + hit.value, 0);
+    s.dps = Math.round(windowDamage / 5);
+    s.peak_dps = Math.max(s.peak_dps, s.dps);
+    s.recent_hits = this.hits.slice(0, 15);
+    renderStats(s);
+  },
+};
+
+// ── Startup ───────────────────────────────────────────────────────────
+async function start() {
+  const placement = loadPlacement();
+  if (Number.isFinite(placement.left) && Number.isFinite(placement.top)) {
+    placePanel(placement.left, placement.top);
+  }
+  setCompact(Boolean(placement.compact));
+  setupDrag();
+
+  $("btn-clickthrough").addEventListener("click", () => setPassthrough(true));
+  $("btn-pause").addEventListener("click", togglePause);
+  $("btn-reset").addEventListener("click", reset);
+  $("btn-compact").addEventListener("click", () =>
+    setCompact(!document.body.classList.contains("compact")),
+  );
+  $("btn-more").addEventListener("click", toggleMenu);
+  $("btn-simulate").addEventListener("click", testHit);
+  $("btn-auto-sim").addEventListener("click", toggleDemo);
+  $("btn-recenter").addEventListener("click", recenter);
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest("#menu, #btn-more")) closeMenu();
+  });
+
+  if (listen) {
+    await listen("combat-stats", (event) => renderStats(event.payload));
+    await listen("capture-status", (event) => {
+      if (event.payload !== view.status) renderStatus(event.payload);
+    });
+    await listen("capture-diagnostics", (event) => renderDiagnostics(event.payload));
+    await listen("clickthrough-toggled", (event) => renderPassthrough(Boolean(event.payload)));
+    try {
+      renderStats(await invoke("get_combat_stats"));
+    } catch (error) {
+      console.error("Could not load session stats:", error);
+    }
+  } else {
+    // Plain browser: no capture. F8 and the stats clock are simulated.
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "F8") setPassthrough(!view.passthrough);
+    });
+    renderStatus("unavailable");
+    $("status-text").textContent = "Preview · no capture";
+    $("capture-details").textContent = "Browser preview. Use the ··· menu to add test hits.";
+    mock.reset();
+    setInterval(() => mock.tick(), 250);
+  }
+}
+
+window.addEventListener("DOMContentLoaded", start);

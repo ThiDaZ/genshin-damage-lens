@@ -146,6 +146,208 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
     None
 }
 
+const ELEMENTS: [ElementType; 8] = [
+    ElementType::Pyro,
+    ElementType::Hydro,
+    ElementType::Cryo,
+    ElementType::Electro,
+    ElementType::Dendro,
+    ElementType::Anemo,
+    ElementType::Geo,
+    ElementType::Physical,
+];
+
+/// Per-pixel segmentation label: 0 for background, otherwise the element plus
+/// one bit that splits Pyro (orange text vs. red effects) and Electro (purple
+/// text vs. reddish scenery). Two pixels belong together iff labels are equal.
+#[inline(always)]
+fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
+    // Same cut as `v < 58` in classify_element, without the float work.
+    if r.max(g).max(b) <= 147 {
+        return 0;
+    }
+    let Some(element) = classify_element(r, g, b) else {
+        return 0;
+    };
+    let split = match element {
+        ElementType::Pyro => (23..=42).contains(&rgb_to_hsv(r, g, b).0),
+        ElementType::Electro => rgb_to_hsv(r, g, b).0 <= 305,
+        _ => false,
+    };
+    let index = ELEMENTS.iter().position(|&e| e == element).unwrap_or(0) as u8;
+    1 + (index << 1 | u8::from(split))
+}
+
+fn element_of_label(label: u8) -> Option<ElementType> {
+    ELEMENTS.get((label.checked_sub(1)? >> 1) as usize).copied()
+}
+
+/// A maximal horizontal stretch of equally labeled pixels.
+struct Run {
+    x0: u32,
+    /// Exclusive end.
+    x1: u32,
+    y: u32,
+    label: u8,
+    /// Touches the coarse scan grid inside the combat viewport.
+    seeded: bool,
+}
+
+/// Classify every pixel once, across cores, and collect the row runs that
+/// connected-component labeling works on. Everything downstream compares
+/// bytes or whole runs instead of re-deriving colors per pixel.
+fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let stride = frame.stride;
+    let data = &frame.data;
+    let table = label_table();
+
+    // Dynamic combat viewport boundaries
+    let y_min = (h as f32 * 0.08) as usize; // Exclude top status/header
+    let y_max = (h as f32 * 0.90) as usize; // Exclude bottom player burst bar
+    let x_min = (w as f32 * 0.06) as usize;
+    let x_max = (w as f32 * 0.94) as usize;
+
+    let mut labels = vec![0u8; w * h];
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8);
+    let band = h.div_ceil(workers).max(1);
+    let mut runs = Vec::new();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = labels
+            .chunks_mut(band * w)
+            .enumerate()
+            .map(|(bi, chunk)| {
+                scope.spawn(move || {
+                    let mut runs: Vec<Run> = Vec::with_capacity(4096);
+                    for (ry, row) in chunk.chunks_exact_mut(w).enumerate() {
+                        let y = bi * band + ry;
+                        let start = y * stride;
+                        let pixels = &data[start..start + w * 4];
+                        let zy = zones.rows[y];
+                        let skill_row = zy & SKILL_ZONE != 0;
+                        // The coarse scan only looks at even rows and columns.
+                        let scan_row = y % 2 == 0 && (y_min..y_max).contains(&y);
+                        let mut open: Option<Run> = None;
+                        for (x, (label, px)) in
+                            row.iter_mut().zip(pixels.chunks_exact(4)).enumerate()
+                        {
+                            // BGRA format from DXGI
+                            let mut value = table[usize::from(px[2]) << 16
+                                | usize::from(px[1]) << 8
+                                | usize::from(px[0])];
+                            // Skill icons and cooldown digits are a wall.
+                            if skill_row && zones.columns[x] & SKILL_ZONE != 0 {
+                                value = 0;
+                            }
+                            *label = value;
+                            if let Some(run) = &mut open {
+                                if run.label == value {
+                                    continue;
+                                }
+                                run.x1 = x as u32;
+                                runs.extend(open.take());
+                            }
+                            if value != 0 {
+                                open = Some(Run {
+                                    x0: x as u32,
+                                    x1: w as u32,
+                                    y: y as u32,
+                                    label: value,
+                                    seeded: false,
+                                });
+                            }
+                        }
+                        runs.extend(open.take());
+                        if scan_row {
+                            for run in runs.iter_mut().rev().take_while(|r| r.y == y as u32) {
+                                let from = (run.x0 as usize).max(x_min).next_multiple_of(2);
+                                let to = (run.x1 as usize).min(x_max);
+                                run.seeded =
+                                    (from..to).step_by(2).any(|x| zones.columns[x] & zy == 0);
+                            }
+                        }
+                    }
+                    runs
+                })
+            })
+            .collect();
+        for handle in handles {
+            runs.extend(handle.join().expect("label worker panicked"));
+        }
+    });
+    (labels, runs)
+}
+
+/// Exact label for every 24-bit color, built once. Turns the per-pixel HSV
+/// classification into a single lookup.
+fn label_table() -> &'static [u8] {
+    static TABLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = vec![0u8; 1 << 24];
+        let workers = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 16);
+        let chunk = (1usize << 24).div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (ci, part) in table.chunks_mut(chunk).enumerate() {
+                scope.spawn(move || {
+                    for (i, label) in part.iter_mut().enumerate() {
+                        let rgb = ci * chunk + i;
+                        *label = label_pixel((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
+                    }
+                });
+            }
+        });
+        table
+    })
+}
+
+#[derive(Clone, Copy)]
+struct Extent {
+    min_x: u32,
+    max_x: u32,
+    min_y: u32,
+    max_y: u32,
+    count: usize,
+    seeded: bool,
+}
+
+const SKILL_ZONE: u8 = 8;
+
+/// HUD areas that never contain damage numbers, as per-column and per-row bit
+/// flags. A pixel is excluded when its column and row share a flag.
+struct HudZones {
+    columns: Vec<u8>,
+    rows: Vec<u8>,
+}
+
+impl HudZones {
+    fn new(w: usize, h: usize) -> Self {
+        let columns = (0..w)
+            .map(|x| {
+                let xf = x as f32 / w as f32;
+                u8::from(xf < 0.16) // minimap & quest HUD (top-left)
+                    | u8::from(xf > 0.35 && xf < 0.65) << 1 // player HP bar
+                    | u8::from(xf > 0.89) << 2 // party member icons
+                    | u8::from(xf > 0.83) << 3 // skill and burst icons
+            })
+            .collect();
+        let rows = (0..h)
+            .map(|y| {
+                let yf = y as f32 / h as f32;
+                u8::from(yf < 0.28)
+                    | u8::from(yf > 0.88) << 1
+                    | u8::from((0.15..=0.65).contains(&yf)) << 2
+                    | u8::from(yf > 0.66) << 3
+            })
+            .collect();
+        Self { columns, rows }
+    }
+}
+
 pub struct ColorFilter;
 
 impl ColorFilter {
@@ -154,73 +356,77 @@ impl ColorFilter {
         let w = frame.width as usize;
         let h = frame.height as usize;
         let stride = frame.stride;
-        let data = &frame.data;
+        if w == 0 || h == 0 || stride < w * 4 || frame.data.len() < (h - 1) * stride + w * 4 {
+            return Vec::new();
+        }
 
         let scale = (h as f32 / 720.0).max(1.0);
+        let zones = HudZones::new(w, h);
+        let (labels, runs) = label_frame(frame, &zones);
 
-        // Dynamic combat viewport boundaries
-        let y_min = (h as f32 * 0.08) as usize; // Exclude top status/header
-        let y_max = (h as f32 * 0.90) as usize; // Exclude bottom player burst bar
-        let x_min = (w as f32 * 0.06) as usize;
-        let x_max = (w as f32 * 0.94) as usize;
-
-        // Grid-based sampling for performance (stride 2x2 coarse pass)
-        let mut visited = vec![false; w * h];
-        let mut components = Vec::new();
-
-        for y in (y_min..y_max).step_by(2) {
-            let row_offset = y * stride;
-            let yf = y as f32 / h as f32;
-
-            for x in (x_min..x_max).step_by(2) {
-                let xf = x as f32 / w as f32;
-
-                // Exclude minimap & quest HUD in top-left
-                if xf < 0.16 && yf < 0.28 {
-                    continue;
-                }
-
-                // Exclude only player bottom HP bar
-                if xf > 0.35 && xf < 0.65 && yf > 0.88 {
-                    continue;
-                }
-
-                // Exclude party member icons on far right
-                if xf > 0.89 && yf >= 0.15 && yf <= 0.65 {
-                    continue;
-                }
-
-                // Exclude bottom-right skill and burst icons & cooldown timers
-                if xf > 0.83 && yf > 0.66 {
-                    continue;
-                }
-
-                let idx = y * w + x;
-                if visited[idx] {
-                    continue;
-                }
-
-                let px_offset = row_offset + x * 4;
-                if px_offset + 3 >= data.len() {
-                    continue;
-                }
-
-                // BGRA format from DXGI
-                let b = data[px_offset];
-                let g = data[px_offset + 1];
-                let r = data[px_offset + 2];
-
-                if let Some(elem) = classify_element(r, g, b) {
-                    // Flood-fill / connected component search within bounding window
-                    let comp = Self::extract_component(frame, x, y, elem, &mut visited, scale);
-                    if let Some(c) = comp {
-                        components.push(c);
+        // Connected components over runs: union overlapping same-label runs of
+        // adjacent rows (4-connectivity). The smaller index stays the root, so
+        // a root is its component's top-left run.
+        let mut row_start = vec![runs.len() as u32; h + 1];
+        for (i, run) in runs.iter().enumerate().rev() {
+            row_start[run.y as usize] = i as u32;
+        }
+        for y in (0..h).rev() {
+            row_start[y] = row_start[y].min(row_start[y + 1]);
+        }
+        let mut parent: Vec<u32> = (0..runs.len() as u32).collect();
+        fn find(parent: &mut [u32], mut i: u32) -> u32 {
+            while parent[i as usize] != i {
+                parent[i as usize] = parent[parent[i as usize] as usize];
+                i = parent[i as usize];
+            }
+            i
+        }
+        for y in 1..h {
+            let (mut a, a_end) = (row_start[y - 1], row_start[y]);
+            let (mut b, b_end) = (row_start[y], row_start[y + 1]);
+            while a < a_end && b < b_end {
+                let (above, below) = (&runs[a as usize], &runs[b as usize]);
+                if above.label == below.label && above.x0 < below.x1 && below.x0 < above.x1 {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    if ra != rb {
+                        parent[ra.max(rb) as usize] = ra.min(rb);
                     }
+                }
+                if above.x1 <= below.x1 {
+                    a += 1;
+                } else {
+                    b += 1;
                 }
             }
         }
 
-        components
+        let mut extents: Vec<Option<Extent>> = vec![None; runs.len()];
+        for (i, run) in runs.iter().enumerate() {
+            let root = find(&mut parent, i as u32) as usize;
+            let e = extents[root].get_or_insert(Extent {
+                min_x: run.x0,
+                max_x: run.x1 - 1,
+                min_y: run.y,
+                max_y: run.y,
+                count: 0,
+                seeded: false,
+            });
+            e.min_x = e.min_x.min(run.x0);
+            e.max_x = e.max_x.max(run.x1 - 1);
+            e.max_y = run.y;
+            e.count += (run.x1 - run.x0) as usize;
+            e.seeded |= run.seeded;
+        }
+
+        extents
+            .iter()
+            .enumerate()
+            .filter_map(|(root, extent)| {
+                let extent = extent.as_ref().filter(|e| e.seeded)?;
+                Self::build_component(frame, &labels, &runs[root], extent, scale)
+            })
+            .collect()
     }
 
     /// Calculate ratio of dark pixels immediately surrounding a bounding box
@@ -297,95 +503,39 @@ impl ColorFilter {
         Self::dark_outline_ratio(frame, min_x, max_x, min_y, max_y) >= 0.18
     }
 
-    pub(crate) fn extract_component(
+    /// Apply the glyph size filters to one connected component and cut its mask.
+    fn build_component(
         frame: &RawFrame,
-        start_x: usize,
-        start_y: usize,
-        target_elem: ElementType,
-        visited: &mut [bool],
+        labels: &[u8],
+        first: &Run,
+        extent: &Extent,
         scale: f32,
     ) -> Option<DetectedComponent> {
         let w = frame.width as usize;
         let h = frame.height as usize;
-        let stride = frame.stride;
         let data = &frame.data;
 
-        let mut queue = Vec::with_capacity(256);
-        let seed_offset = start_y * stride + start_x * 4;
-        let seed_hsv = rgb_to_hsv(
+        // Damage text can share its element with an enormous attack effect.
+        // The label also separates orange text from red effects within Pyro and
+        // purple text from reddish scenery within Electro.
+        let seed = first.label;
+        let target_elem = element_of_label(seed)?;
+        let seed_offset = first.y as usize * frame.stride + first.x0 as usize * 4;
+        let seed_hue = rgb_to_hsv(
             data[seed_offset + 2],
             data[seed_offset + 1],
             data[seed_offset],
-        );
-        // Damage text can share its element with an enormous attack effect.
-        // Separate orange text from red effects within the Pyro color range.
-        let matches_seed = |r, g, b| {
-            if classify_element(r, g, b) != Some(target_elem) {
-                return false;
-            }
-            let hsv = rgb_to_hsv(r, g, b);
-            match target_elem {
-                ElementType::Pyro => (23..=42).contains(&hsv.0) == (23..=42).contains(&seed_hsv.0),
-                // Purple text must not flood into reddish, low-saturation scenery
-                // that also falls inside the broad Electro classification range.
-                ElementType::Electro => (hsv.0 <= 305) == (seed_hsv.0 <= 305),
-                _ => true,
-            }
-        };
-        queue.push((start_x, start_y));
-        visited[start_y * w + start_x] = true;
+        )
+        .0;
 
-        let mut min_x = start_x;
-        let mut max_x = start_x;
-        let mut min_y = start_y;
-        let mut max_y = start_y;
-        let mut count = 0;
-
-        // Max component search radius to avoid exploding on large background planes
+        // Large background planes and effects are not text.
         // Text grows briefly on impact; area scales in two dimensions.
-        let max_pixels = (12_000.0 * scale * scale) as usize;
-
-        while let Some((cx, cy)) = queue.pop() {
-            count += 1;
-            if count > max_pixels {
-                return None;
-            }
-
-            min_x = min_x.min(cx);
-            max_x = max_x.max(cx);
-            min_y = min_y.min(cy);
-            max_y = max_y.max(cy);
-
-            // 4-neighborhood
-            let neighbors = [
-                (cx.wrapping_sub(1), cy),
-                (cx + 1, cy),
-                (cx, cy.wrapping_sub(1)),
-                (cx, cy + 1),
-            ];
-
-            for (nx, ny) in neighbors {
-                if nx < w && ny < h {
-                    if (nx as f32 / w as f32) > 0.83 && (ny as f32 / h as f32) > 0.66 {
-                        continue;
-                    }
-                    let n_idx = ny * w + nx;
-                    if !visited[n_idx] {
-                        let px_offset = ny * stride + nx * 4;
-                        if px_offset + 3 < data.len() {
-                            let b = data[px_offset];
-                            let g = data[px_offset + 1];
-                            let r = data[px_offset + 2];
-
-                            if matches_seed(r, g, b) {
-                                visited[n_idx] = true;
-                                queue.push((nx, ny));
-                            }
-                        }
-                    }
-                }
-            }
+        let count = extent.count;
+        if count > (12_000.0 * scale * scale) as usize {
+            return None;
         }
+        let (min_x, max_x) = (extent.min_x as usize, extent.max_x as usize);
+        let (min_y, max_y) = (extent.min_y as usize, extent.max_y as usize);
 
         let comp_w = (max_x - min_x + 1) as u32;
         let comp_h = (max_y - min_y + 1) as u32;
@@ -415,16 +565,11 @@ impl ColorFilter {
 
         // Build binary mask for template matching
         let mut mask = vec![0u8; (comp_w * comp_h) as usize];
-        for cy in min_y..=max_y {
-            for cx in min_x..=max_x {
-                let px_offset = cy * stride + cx * 4;
-                if px_offset + 3 < data.len() {
-                    let b = data[px_offset];
-                    let g = data[px_offset + 1];
-                    let r = data[px_offset + 2];
-                    if matches_seed(r, g, b) {
-                        mask[(cy - min_y) * comp_w as usize + (cx - min_x)] = 255;
-                    }
+        for (cy, out) in (min_y..=max_y).zip(mask.chunks_exact_mut(comp_w as usize)) {
+            let row = &labels[cy * w + min_x..=cy * w + max_x];
+            for (m, &label) in out.iter_mut().zip(row) {
+                if label == seed {
+                    *m = 255;
                 }
             }
         }
@@ -453,7 +598,7 @@ impl ColorFilter {
                 height: comp_h,
             },
             element: target_elem,
-            hue: seed_hsv.0,
+            hue: seed_hue,
             pixel_count: count,
             mask,
         })

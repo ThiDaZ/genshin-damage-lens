@@ -81,6 +81,8 @@ fn confirms_a_complete_electro_number_once_across_recorded_frames() {
         confirmed
             .extend(engine.process_frame_at(&frame, start + std::time::Duration::from_millis(ms)));
     }
+    // The vote happens once the number has been watched long enough or is gone.
+    confirmed.extend(engine.no_new_frame(start + std::time::Duration::from_secs(3)));
     assert_eq!(confirmed.len(), 1);
     assert_eq!(
         (confirmed[0].value, confirmed[0].element),

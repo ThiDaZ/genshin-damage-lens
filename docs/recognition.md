@@ -33,7 +33,7 @@ The full-frame images in `src-tauri/tests/fixtures` cover orange Pyro text over 
 
 Touching glyphs use a bounded dynamic-programming search over projection valleys. Template confidence plus a per-glyph cost discourages splitting rounded digits into several narrow fragments. The original projection splitter remains a fallback when no valid complete path is found. Electro segmentation separates purple text from reddish scenery inside the broad element hue range. These changes improve the checked-in examples without lowering the final number confidence thresholds.
 
-Tracker unit tests separately cover repeated values, nearby reordered hits, outlier readings, no-frame gaps, static noise, invalid confidence, expiry and reset. State tests check that reset/pause invalidate in-flight results. Crop tests cover negative monitor origins and intersections.
+Tracker unit tests separately cover drift in any direction, the pop-in shrink, fragments of a tracked number, a number returning after occlusion, simultaneous equal hits, consecutive hits with similar values, nearby reordered hits, outlier readings, no-frame gaps, static text, invalid confidence, expiry and reset. State tests check that reset/pause invalidate in-flight results. Crop tests cover negative monitor origins and intersections.
 
 ## Next recognizer decision
 
@@ -79,3 +79,48 @@ blue effects do not appear as bright as white text merely because a blue channel
 is 255. Large vertically broken glyphs may be rejoined when alignment, gap size
 and template confidence support a complete digit. The captured `physical-impact`
 regression verifies the full Physical 1215 despite overlapping orange text.
+
+## Recording benchmark
+
+`video_bench` feeds a gameplay recording through the same engine as the live loop and
+prints confirmed hits and per-frame timing:
+
+```bash
+ffmpeg -v error -i clip.mp4 -f rawvideo -pix_fmt bgra - | cargo run --manifest-path src-tauri/Cargo.toml --release --example video_bench -- 1920 1080 60 --realtime
+```
+
+Pass the recording's own width, height and frame rate. `--realtime` skips the frames
+that would have gone by while the previous one was processed, which is what live
+capture experiences. `--detections` prints every single-frame reading and `--trace`
+prints each confirmed track with its readings, tracks dropped without a hit, and
+repeats that were suppressed. Run it from Git Bash or `cmd`: Windows PowerShell 5
+re-encodes binary pipes.
+
+Local measurements on seven 1080p60 element recordings and three 720p30 combat
+recordings (one machine, not a hardware-independent guarantee):
+
+| | Before | After |
+|---|---|---|
+| 1080p processing per frame | about 86 ms | 6–7 ms |
+| 720p processing per frame | not measured | 4–5 ms |
+| Frames seen at live speed (Pyro clip, 1266 frames) | 207 | 1261 |
+| Hits confirmed at live speed (Pyro clip) | 7 | 27 |
+
+The speed came from labeling pixels through a lookup table across cores, building
+connected components from row runs instead of a per-pixel flood fill, and bit-packed
+template scoring.
+
+The missed hits came mostly from the tracker, not the reader: it confirmed only
+numbers that drifted upward, while numbers follow the camera in every direction.
+A 25364 read correctly in 45 consecutive frames was never counted. Fragments of a
+partly hidden number (a "91" from 19191) were counted as hits of their own.
+
+These recordings have no hand-made labels. The confirmed hits of the Pyro, Cryo,
+Hydro, Geo and Physical clips were compared by eye against video frames at each hit;
+most match. Known remaining errors there: a 6018 overlapped by another number is
+read as 601, a 6318 as 63189, and occasional single-digit misreads. Hits that were
+never confirmed are only visible through `--trace`; recall has not been counted.
+Treat the table as a before/after comparison, not an accuracy figure.
+
+The live confirmation delay is 0.6 s. Offline event manifests must flush the engine
+after the last frame (the `replay` example does) so numbers still on screen confirm.
