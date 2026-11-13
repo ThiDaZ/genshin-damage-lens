@@ -1,5 +1,9 @@
 # GenshinDamageLens
 
+<p align="center">
+  <img src="docs/assets/logo.webp" alt="GenshinDamageLens logo" width="220" />
+</p>
+
 A Windows damage-capture overlay built with Rust, Tauri, DXGI and vanilla JavaScript. It reads visible damage numbers from screenshots and aggregates confirmed hits into rolling DPS, totals, peak hits and elemental breakdowns.
 
 ## Running
