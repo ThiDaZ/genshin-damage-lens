@@ -222,6 +222,34 @@ function toggleDemo() {
   button.classList.toggle("on", Boolean(view.demo));
 }
 
+// Recorders only see the overlay when it is not excluded from screen capture.
+// The capture backend then blanks the panel's box so it never reads itself.
+async function setShowInRecordings(on) {
+  if (invoke) {
+    try {
+      await invoke("set_show_in_recordings", { visible: on });
+    } catch (error) {
+      console.warn("Could not change recording visibility:", error);
+      return;
+    }
+  }
+  $("btn-recordings").classList.toggle("on", on);
+  savePlacement({ recordings: on });
+}
+
+// Tell the backend where the panel is, in physical pixels of the window.
+function reportPanelRect() {
+  if (!invoke) return;
+  const box = panel.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  invoke("set_panel_rect", {
+    x: box.left * scale,
+    y: box.top * scale,
+    width: box.width * scale,
+    height: box.height * scale,
+  }).catch((error) => console.warn("Could not report panel position:", error));
+}
+
 function closeMenu() {
   $("menu").hidden = true;
   $("btn-more").setAttribute("aria-expanded", "false");
@@ -262,6 +290,7 @@ function placePanel(left, top) {
   const maxTop = Math.max(0, window.innerHeight - 60);
   panel.style.left = `${Math.min(Math.max(0, left), maxLeft)}px`;
   panel.style.top = `${Math.min(Math.max(0, top), maxTop)}px`;
+  reportPanelRect();
 }
 
 function setupDrag() {
@@ -289,6 +318,7 @@ function setupDrag() {
 function recenter() {
   panel.style.left = "";
   panel.style.top = "";
+  reportPanelRect();
   savePlacement({ left: undefined, top: undefined });
   closeMenu();
 }
@@ -357,6 +387,14 @@ async function start() {
   $("btn-simulate").addEventListener("click", testHit);
   $("btn-auto-sim").addEventListener("click", toggleDemo);
   $("btn-recenter").addEventListener("click", recenter);
+  $("btn-recordings").addEventListener("click", () =>
+    setShowInRecordings(!$("btn-recordings").classList.contains("on")),
+  );
+  // The panel grows and shrinks with its content and the compact view.
+  new ResizeObserver(reportPanelRect).observe(panel);
+  window.addEventListener("resize", reportPanelRect);
+  reportPanelRect();
+  if (placement.recordings) await setShowInRecordings(true);
   document.addEventListener("pointerdown", (event) => {
     if (!event.target.closest("#menu, #btn-more")) closeMenu();
   });
