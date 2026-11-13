@@ -159,6 +159,18 @@ async function setupEventListeners() {
       dot.style.background = status === "tracking" ? "#10b981" : "#f59e0b";
       dot.style.animationPlayState = status === "tracking" ? "running" : "paused";
     });
+
+    await listen("capture-diagnostics", (event) => {
+      const d = event.payload;
+      const details = document.getElementById("capture-details");
+      if (d.status === "tracking") {
+        details.textContent = `${d.width}×${d.height} · ${d.fps.toFixed(1)} FPS · ${d.candidates} readings · ${d.hits} confirmed / 2s`;
+        details.title = `Average recognition: ${d.processing_ms.toFixed(1)} ms. Readings are OCR candidates before motion and confidence checks.`;
+      } else {
+        details.textContent = d.status === "paused" ? "Capture paused" : "Game capture unavailable";
+        details.title = "";
+      }
+    });
   }
 
   // Toggle Click-Through mode
@@ -317,7 +329,10 @@ function mockReset() {
 // Initialize on Load
 window.addEventListener("DOMContentLoaded", async () => {
   await setupEventListeners();
-  if (!invoke) document.getElementById("capture-badge").textContent = "DEMO PREVIEW";
+  if (!invoke) {
+    document.getElementById("capture-badge").textContent = "DEMO PREVIEW";
+    document.getElementById("capture-details").textContent = "Demo preview — no game capture";
+  }
 
   // Initial fetch from backend
   if (invoke) {

@@ -42,3 +42,40 @@ Collect complete, manually reviewed combat and no-damage sequences across elemen
 Compare the existing recognizer with a compact whole-number OCR candidate on identical recordings and the same temporal tracker. Report event precision/recall, duplicate rate, damage error, confirmation delay, processing latency and memory. Choose acceptance thresholds before evaluating the held-out recordings. Ship a model only if these measurements justify its added runtime and maintenance cost.
 
 Windows Graphics Capture can be evaluated separately through the capture outcome contract. Live checks should include game startup/minimize/restore, reset during recognition, moving the game across displays, display/device changes, and comparing totals against a manually counted recording. Screenshot replays cannot establish these device behaviors.
+
+## Live diagnosis
+
+`pnpm run dev` uses Cargo's dev profile. The app's own pixel loops must be optimized,
+not just dependency crates. A local 1080p measurement on the Electro fixture went
+from about 325 ms to 63 ms per frame after enabling dev optimization. These are
+single local measurements, not a hardware-independent FPS guarantee. Recording
+timestamps let offline replays pass even when processing is too slow for live use.
+
+The HUD and terminal now expose received frames/FPS, capture dimensions, raw OCR
+candidate count, confirmed hits and mean processing time. Candidates with no
+confirmed hits point to insufficient temporal evidence; no candidates during
+visible damage point to segmentation/OCR. No received frames point to capture.
+
+To inspect the same capture pipeline locally:
+
+```powershell
+cargo run --manifest-path src-tauri/Cargo.toml --example capture_probe -- scratch/live-capture
+```
+
+Keep the game visible and fight during the 15-second sample. This command saves at
+most 15 game-crop PNGs and a capture summary locally after sampling, and prints OCR
+readings. It does not upload images. Image timestamps are sampling metadata, not
+manually verified damage labels; annotate before treating them as an accuracy test.
+
+The first live combat probe processed 166 frames in 15 seconds, producing 167 OCR
+readings and 12 confirmed hits after dev optimization. It captured a 1920×1080
+desktop crop. This proves the pipeline received and confirmed live observations,
+not that every attack was counted correctly.
+
+That sample also exposed impact-animation glyphs above the old 82-pixel limit at
+1080p. The detector now allows larger glyphs with a bounded pixel budget that
+scales by area. Relative Physical-outline contrast uses luminance so saturated
+blue effects do not appear as bright as white text merely because a blue channel
+is 255. Large vertically broken glyphs may be rejoined when alignment, gap size
+and template confidence support a complete digit. The captured `physical-impact`
+regression verifies the full Physical 1215 despite overlapping orange text.

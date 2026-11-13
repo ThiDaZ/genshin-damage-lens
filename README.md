@@ -15,6 +15,16 @@ pnpm run build
 
 The overlay starts in interactive mode. Press **F8** or the mode button for click-through. The badge shows **Tracking**, **Waiting for game**, or **Paused**, based on the capture worker. Test Hit and Demo Loop generate simulated hits; use Reset before measuring real combat.
 
+The combat feed also shows the actual capture size/FPS, OCR readings and confirmed
+hits from the recent diagnostics interval. Tracking means frames are arriving;
+it does not guarantee that a damage number was recognized. The terminal prints
+the same counters as `[Capture diagnostics]`.
+
+Development builds optimize the application's Rust code as well as dependencies.
+After changing build settings, stop and restart `pnpm run dev` to rebuild it.
+Unoptimized pixel processing can run slower than the track expiry interval and
+prevent confirmation even though the badge says Tracking.
+
 ## Capture and recognition
 
 1. Find the visible Genshin client area and select its display and graphics adapter.

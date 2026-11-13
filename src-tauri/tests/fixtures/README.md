@@ -16,6 +16,9 @@ These full-size PNGs were copied from the existing local gameplay screenshots on
   142, 143 and 145. One visible 2066 event; times preserve the existing 100 ms
   extraction assumption and deliberately omit frame 144 to exercise a gap.
   `electro-events.json` evaluates confirmation of this single event.
+- `physical-impact.png`: local live combat sample on 2026-09-08. A large white
+  Physical 1215 over an attack effect exceeds the previous glyph height limit.
+  The test checks that hit; overlapping orange numbers are not exhaustively labeled.
 
 `recognition.json` labels **per-frame OCR**, not unique temporal hit events. This is
 a development regression set, not a held-out accuracy benchmark or training set.
