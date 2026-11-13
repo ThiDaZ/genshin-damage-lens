@@ -55,6 +55,17 @@ fn scenery_does_not_produce_damage() {
 }
 
 #[test]
+fn reads_large_physical_impact_number_from_live_combat() {
+    let engine = VisionEngine::new();
+    let hits = engine.detect_frame(&load("physical-impact.png"));
+    assert!(
+        hits.iter()
+            .any(|hit| hit.value == 1215 && hit.element == ElementType::Physical),
+        "The large animated Physical 1215 must survive size filtering: {hits:?}"
+    );
+}
+
+#[test]
 fn confirms_a_complete_electro_number_once_across_recorded_frames() {
     let mut engine = VisionEngine::new();
     let start = std::time::Instant::now();

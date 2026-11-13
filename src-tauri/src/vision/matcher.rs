@@ -483,6 +483,83 @@ pub struct DigitMatcher {
 }
 
 impl DigitMatcher {
+    /// Recover a large digit interrupted by an overlapping damage number.
+    /// Require aligned edges, a short vertical gap and a strong complete shape.
+    pub(crate) fn merge_vertical_fragments(
+        mut comps: Vec<DetectedComponent>,
+        scale: f32,
+    ) -> Vec<DetectedComponent> {
+        let templates = DigitTemplates::new();
+        comps.sort_by_key(|c| c.bbox.y);
+        let mut used = vec![false; comps.len()];
+        let mut result = Vec::with_capacity(comps.len());
+        for i in 0..comps.len() {
+            if used[i] {
+                continue;
+            }
+            let a = &comps[i];
+            let mut recovered = None;
+            for j in i + 1..comps.len() {
+                let b = &comps[j];
+                if used[j] || a.element != b.element {
+                    continue;
+                }
+                if (a.element == crate::state::ElementType::Pyro
+                    && (23..=42).contains(&a.hue) != (23..=42).contains(&b.hue))
+                    || (a.element == crate::state::ElementType::Electro
+                        && (a.hue <= 305) != (b.hue <= 305))
+                {
+                    continue;
+                }
+                let bbox = a.bbox.merge(&b.bbox);
+                let gap = b.bbox.y as i64 - i64::from(a.bbox.y + a.bbox.height);
+                if bbox.height as f32 <= 55.0 * scale
+                    || bbox.height as f32 > 110.0 * scale
+                    || bbox.width as f32 / bbox.height as f32 > 0.60
+                    || gap < 1
+                    || gap as f32 > bbox.height as f32 * 0.25
+                    || (a.bbox.height.min(b.bbox.height) as f32) < bbox.height as f32 * 0.20
+                    || (i64::from(a.bbox.x + a.bbox.width) - i64::from(b.bbox.x + b.bbox.width))
+                        .abs() as f32
+                        > 2.0 * scale
+                {
+                    continue;
+                }
+                let overlap = (a.bbox.x + a.bbox.width)
+                    .min(b.bbox.x + b.bbox.width)
+                    .saturating_sub(a.bbox.x.max(b.bbox.x));
+                if (overlap as f32) < a.bbox.width.min(b.bbox.width) as f32 * 0.8 {
+                    continue;
+                }
+                let mut mask = vec![0; (bbox.width * bbox.height) as usize];
+                for g in [a, b] {
+                    for y in 0..g.bbox.height {
+                        for x in 0..g.bbox.width {
+                            mask[((g.bbox.y - bbox.y + y) * bbox.width + g.bbox.x - bbox.x + x)
+                                as usize] |= g.mask[(y * g.bbox.width + x) as usize];
+                        }
+                    }
+                }
+                let (_, confidence) =
+                    templates.match_glyph(&mask, bbox.width as usize, bbox.height as usize);
+                if confidence < 0.75 {
+                    continue;
+                }
+                used[j] = true;
+                recovered = Some(DetectedComponent {
+                    bbox,
+                    element: a.element,
+                    hue: a.hue,
+                    pixel_count: a.pixel_count + b.pixel_count,
+                    mask,
+                });
+                break;
+            }
+            result.push(recovered.unwrap_or_else(|| a.clone()));
+        }
+        result
+    }
+
     /// Choose cuts across an outlined/touching number using whole-digit evidence.
     /// Low column counts supply candidate cuts; dynamic programming discourages
     /// explaining one rounded digit as two narrow fragments.
