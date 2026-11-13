@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use vision::VisionEngine;
 
-#[cfg(windows)]
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F8};
 
 #[tauri::command]
 fn get_combat_stats(state: State<'_, SharedState>) -> CombatStats {
@@ -118,6 +116,61 @@ fn simulate_hit(
     event
 }
 
+/// Flip click-through from the global hotkey and tell the panel.
+#[cfg(windows)]
+fn toggle_click_through_from_hotkey(app_handle: &AppHandle, state: &SharedState) {
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let mut s = state.lock();
+        let new_state = !s.click_through;
+        if window.set_ignore_cursor_events(new_state).is_ok() {
+            s.click_through = new_state;
+            let _ = app_handle.emit("clickthrough-toggled", new_state);
+        }
+    }
+}
+
+/// F8 as a system-wide hotkey on its own thread.
+///
+/// The system delivers a registered hotkey whichever window has focus, and
+/// independently of the capture loop. The old approach, sampling the key state
+/// once per captured frame, missed presses whenever a frame took long and read
+/// nothing at all while a game running as administrator had focus.
+#[cfg(windows)]
+fn spawn_hotkey_thread(app_handle: AppHandle, state: SharedState) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, RegisterHotKey, MOD_NOREPEAT, VK_F8,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+
+    thread::spawn(move || {
+        const HOTKEY_ID: i32 = 1;
+        let registered =
+            unsafe { RegisterHotKey(None, HOTKEY_ID, MOD_NOREPEAT, u32::from(VK_F8.0)) };
+        if registered.is_ok() {
+            // Hotkeys registered without a window arrive on this thread's queue.
+            let mut message = MSG::default();
+            while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+                if message.message == WM_HOTKEY && message.wParam.0 == HOTKEY_ID as usize {
+                    toggle_click_through_from_hotkey(&app_handle, &state);
+                }
+            }
+            return;
+        }
+
+        // Another program owns F8. Fall back to watching the key directly.
+        eprintln!("[Hotkey] F8 is registered by another program; polling the key instead.");
+        let mut was_down = false;
+        loop {
+            let down = unsafe { (GetAsyncKeyState(i32::from(VK_F8.0)) as u16 & 0x8000) != 0 };
+            if down && !was_down {
+                toggle_click_through_from_hotkey(&app_handle, &state);
+            }
+            was_down = down;
+            thread::sleep(Duration::from_millis(15));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shared_state: SharedState = Arc::new(parking_lot::Mutex::new(AppState::new()));
@@ -157,6 +210,9 @@ pub fn run() {
                 }
             }
 
+            #[cfg(windows)]
+            spawn_hotkey_thread(app.handle().clone(), shared_state.clone());
+
             // Spawn background vision & capture thread
             thread::spawn(move || {
                 let mut capture = ScreenCapture::new();
@@ -179,35 +235,9 @@ pub fn run() {
                 let mut diagnostic_hits = 0usize;
                 let mut diagnostic_ocr_ms = 0.0;
                 let mut diagnostic_size = (0, 0);
-                #[cfg(windows)]
-                let mut f8_was_down = false;
-                #[cfg(windows)]
-                let mut last_f8_time = Instant::now();
 
                 while running_clone.load(Ordering::Relaxed) {
                     let loop_start = Instant::now();
-
-                    // Global F8 Hotkey check (works even when overlay or game is unfocused)
-                    #[cfg(windows)]
-                    {
-                        let f8_down =
-                            unsafe { (GetAsyncKeyState(VK_F8.0 as i32) as u16 & 0x8000) != 0 };
-                        if f8_down
-                            && !f8_was_down
-                            && last_f8_time.elapsed() >= Duration::from_millis(250)
-                        {
-                            last_f8_time = Instant::now();
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let mut s = state_clone.lock();
-                                let new_state = !s.click_through;
-                                if window.set_ignore_cursor_events(new_state).is_ok() {
-                                    s.click_through = new_state;
-                                    let _ = app_handle.emit("clickthrough-toggled", new_state);
-                                }
-                            }
-                        }
-                        f8_was_down = f8_down;
-                    }
 
                     let (is_active, generation) = {
                         let s = state_clone.lock();

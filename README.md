@@ -111,6 +111,7 @@ See [replay evaluation](docs/recognition.md) for annotation format, metrics and 
 
 ## Current limits
 
+- F8 is registered as a system-wide hotkey. If another program already owns F8 the overlay falls back to watching the key, which cannot see key presses while a window running as administrator has focus. Genshin Impact normally runs as administrator, so in that case start the overlay as administrator too.
 - DXGI captures the visible desktop: other windows can obscure game pixels.
 - Selects the monitor containing the game center; a window spanning displays captures only that monitor's intersection. Negative display coordinates are supported; rotated displays are explicitly unsupported.
 - A minimum 640 × 480 visible crop is required. HUD exclusion regions and size/color thresholds assume the usual game layout.
