@@ -123,6 +123,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_diagnose_user_problem_frame() {
         let path = std::path::Path::new("../sample_video/user_problem_frame.png");
         if !path.exists() {
@@ -182,6 +183,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_diagnose_issue_video_frames() {
         let matcher = DigitMatcher::new();
         let mut total_false_hits = 0;
@@ -254,6 +256,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_recognize_frame_035_damage_4046_and_14229() {
         let frame = match load_sample_frame(35) {
             Some(f) => f,
@@ -351,6 +354,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_recognize_frame_046_damage_32625() {
         let frame = match load_sample_frame(46) {
             Some(f) => f,
@@ -404,6 +408,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_recognize_frame_042_damage_1141() {
         let frame = match load_sample_frame(42) {
             Some(f) => f,
@@ -473,6 +478,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_recognize_frame_040_and_037() {
         let matcher = DigitMatcher::new();
 
@@ -523,6 +529,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_vision_engine_tracking_end_to_end() {
         let mut engine = VisionEngine::new();
         let replay_start = Instant::now();
@@ -580,6 +587,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_diagnose_roam_frames() {
         let mut engine = VisionEngine::new();
         let replay_start = Instant::now();
@@ -761,6 +769,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_element_cryo_video() {
         let Some((total, matched)) = run_element_video_test("cryo", ElementType::Cryo) else {
             return;
@@ -777,6 +786,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_element_dendro_video() {
         let Some((total, matched)) = run_element_video_test("dendro", ElementType::Dendro) else {
             return;
@@ -793,6 +803,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_element_electro_video() {
         let Some((total, matched)) = run_element_video_test("electro", ElementType::Electro) else {
             return;
@@ -809,6 +820,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_element_geo_video() {
         let Some((total, matched)) = run_element_video_test("geo", ElementType::Geo) else {
             return;
@@ -829,6 +841,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_element_hydro_video() {
         let Some((total, matched)) = run_element_video_test("hydro", ElementType::Hydro) else {
             return;
@@ -845,6 +858,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_element_physical_video() {
         let Some((total, matched)) = run_element_video_test("physical", ElementType::Physical)
         else {
@@ -862,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses local sample_video/scratch recordings; run with --ignored"]
     fn test_element_pyro_video() {
         let Some((total, matched)) = run_element_video_test("pyro", ElementType::Pyro) else {
             return;
