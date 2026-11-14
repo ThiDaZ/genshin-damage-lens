@@ -97,6 +97,14 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
     if s <= 8 && v >= 85 {
         return Some(ElementType::Physical);
     }
+    // White text over the warm stone and sand that fill most arenas: the
+    // anti-aliased edge of every stroke is white blended with the floor. With
+    // the strict test alone those pixels are dropped, which thins small digits
+    // until they no longer match. Warm hues only, and still far paler than Geo
+    // (S >= 30) or Pyro (S >= 40) text.
+    if s <= 16 && v >= 85 && (10..=54).contains(&h) {
+        return Some(ElementType::Physical);
+    }
 
     // Electro: Violet / Magenta / Lavender / Pink
     if (245..=341).contains(&h) && s >= 10 && v >= 60 {
@@ -275,6 +283,14 @@ fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
                         }
                         let mut x = 0;
                         while x < w {
+                            // Background comes in long stretches: skip it
+                            // eight pixels at a time.
+                            if let Some(word) = row.get(x..x + 8) {
+                                if word == [0u8; 8] {
+                                    x += 8;
+                                    continue;
+                                }
+                            }
                             let value = row[x];
                             if value == 0 {
                                 x += 1;
@@ -322,7 +338,7 @@ fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
 struct LabelTable {
     /// Below `MIXED`: the label of a uniform block. Otherwise `MIXED` plus the
     /// index of the block's own labels in `mixed`.
-    blocks: Vec<u16>,
+    blocks: Box<[u16; 4096]>,
     mixed: Vec<u8>,
 }
 
@@ -331,6 +347,8 @@ const MIXED: u16 = 256;
 impl LabelTable {
     #[inline(always)]
     fn label(&self, r: u8, g: u8, b: u8) -> u8 {
+        // Three 4-bit fields: the index is below 4096 by construction, which
+        // lets the fixed-size table be read without a bounds check.
         let block =
             self.blocks[usize::from(r >> 4) << 8 | usize::from(g >> 4) << 4 | usize::from(b >> 4)];
         if block < MIXED {
@@ -375,13 +393,13 @@ impl LabelTable {
                 parts.push(handle.join().expect("label table worker panicked"));
             }
         });
-        let mut blocks = Vec::with_capacity(4096);
+        let mut blocks = Box::new([0u16; 4096]);
         let mut mixed = Vec::new();
-        for labels in parts.into_iter().flatten() {
+        for (block, labels) in blocks.iter_mut().zip(parts.into_iter().flatten()) {
             if labels.iter().all(|&l| l == labels[0]) {
-                blocks.push(u16::from(labels[0]));
+                *block = u16::from(labels[0]);
             } else {
-                blocks.push(MIXED + (mixed.len() >> 12) as u16);
+                *block = MIXED + (mixed.len() >> 12) as u16;
                 mixed.extend_from_slice(&labels);
             }
         }
