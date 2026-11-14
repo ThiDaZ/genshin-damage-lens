@@ -198,3 +198,63 @@ number had produced a 902752 from a 2752 next to a 906.
 Still open: hits fully covered by others in a pile are not counted, and digits of
 22–25 px score only 0.5–0.8 against the templates, so small numbers are read in
 fewer frames than large ones.
+
+## Lunar-Bloom numbers and green glow (2026-11-14)
+
+Lunar-Bloom damage was not counted at all, for two separate reasons.
+
+**The numbers are drawn differently.** Measured in the local recording
+`2026-11-14 20-39-26.mp4` (Nefer, Lauma, Columbina, Nahida): every digit is a
+vertical gradient at full brightness, pale green at the top (about RGB
+185,253,180: saturation 30 %) fading to white at the bottom, inside a dark green
+outline, and the digits lean right by about 0.27 px per pixel of height. The
+element classes cut such a digit into pale Dendro, nothing and Physical, and
+the templates are upright, so no digit was ever matched.
+
+- The green part of the gradient has a segmentation label of its own (hue
+  60-150, saturation 9-45 %, brightness 88 % or more). It reports as Dendro,
+  which is the damage type of Lunar-Bloom.
+- The white end cannot be told from white text by color. Taking pixels of 4-8 %
+  saturation as well broke up white Physical numbers over green scenery (a 2176
+  produced an extra "176"), so those stay Physical. Instead each Lunar-Bloom
+  component is grown into the white pixels connected to it, inside a window
+  reaching 0.7 of its height below it.
+- The completed glyph is sheared upright before clustering, splitting and
+  template matching, which then need no knowledge of the lean. Growing by
+  connectivity also keeps leaning neighbors out of the mask: their boxes overlap.
+
+**Green glow swallowed ordinary Dendro text.** Lunar-Bloom, Lauma's field and the
+Dendro weak-point marker cover the fight in a pale green glow (saturation
+20-45 %) that is Dendro by hue, like the fully saturated text (about RGB
+0,202,80). Text and glow formed one component, in one measured frame 46,821
+pixels around a five-digit number, which the size filter drops. The Dendro
+label now carries a split bit like Pyro and Electro: saturation of 60 % or more
+is text. Components are compared by label instead of per-element hue ranges.
+
+Measured, original binary against the new one:
+
+- `2026-11-14 20-39-26.mp4`: 34 hits before, 65 after. 23 of the new ones are
+  Lunar-Bloom numbers (11980 eight times, 10941 three times, 52860, 18579,
+  13934, 49125 and 65500 twice each, 70480, 12949); the repeated values were
+  checked against frames and are separate hits. Ten more are ordinary Dendro
+  numbers freed from glow, and two misreads ("1004", "52") are gone. With
+  `--realtime` the result is the same.
+- `sample_video/elements/dendro.mp4`: 26 hits before, 33 after. New: two 4191
+  over the weak-point marker, a 298 and several 246/261/345. Gone: a "981" that
+  was a misread of an overlapping 298 and 281.
+- Six other element recordings and four of five earlier combat recordings:
+  identical hits. In the fifth (720p), eight instead of nine false "100"
+  readings and one new false "798"; see below.
+- Processing time per frame: equal on a recording without Lunar-Bloom (8.5 ms
+  against 8.4 ms, run back to back), 7.8 ms against 9.0 ms on the Lunar-Bloom
+  recording.
+
+Not measured: how many Lunar-Bloom numbers the recording contains in total, so
+this is not a recall figure. Numbers covered by a larger one are still missed
+(one of four 10941 in the `lunar-bloom.png` fixture), and while a number pops in
+it is larger than the glyph limit. Lunar-Bloom text is larger than ordinary
+text, so the height rule marks every one of these hits as a crit. Lunar-Charged
+and Lunar-Crystallize were not examined. Live capture was not retested.
+
+Still open, and older than this change: the green enemy label "Lv. 100" is read
+as a Dendro 100, and green healing numbers ("+1543") are counted as Dendro damage.

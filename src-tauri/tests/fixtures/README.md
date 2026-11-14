@@ -21,6 +21,10 @@ These full-size PNGs were copied from the existing local gameplay screenshots on
 - `physical-impact.png`: local live combat sample on 2026-09-08. A large white
   Physical 1215 over an attack effect exceeds the previous glyph height limit.
   The test checks that hit; overlapping orange numbers are not exhaustively labeled.
+- `lunar-bloom.png`: frame 684 of the local recording `2026-11-14 20-39-26.mp4`.
+  Four Lunar-Bloom 10941 numbers in the slanted gradient font, at three sizes.
+  The test expects the three unobstructed ones; the fourth is covered by the
+  largest and is not labeled.
 
 `recognition.json` labels **per-frame OCR**, not unique temporal hit events. This is
 a development regression set, not a held-out accuracy benchmark or training set.
