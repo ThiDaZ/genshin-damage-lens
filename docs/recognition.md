@@ -124,3 +124,43 @@ Treat the table as a before/after comparison, not an accuracy figure.
 
 The live confirmation delay is 0.6 s. Offline event manifests must flush the engine
 after the last frame (the `replay` example does) so numbers still on screen confirm.
+
+## Burst hits and live load (2026-11-13 recording)
+
+A 1080p recording made with the overlay visible showed its own diagnostics:
+about 21 fps and 22.6 ms per frame, against 6–7 ms in offline replays. Replaying
+that recording (`--mask 0,330,340,510` blanks the panel) found 21 hits where about
+30 numbers are readable. The causes, in order of effect:
+
+- **Evidence thresholds tied to frame count.** A number in a burst is readable only
+  until the next one pops in over it, often 100–130 ms. A rule of "six readings or
+  150 ms" tuned on 60 fps recordings dropped numbers read four or five times at
+  20–30 fps. The bar is now 60 ms on screen with three agreeing readings, or a
+  number of four or more digits read whole in its last two frames.
+- **Overlapping numbers traded fragments.** When two numbers overlap, each loses
+  digits to the other for a frame. The fragment of one was paired with the other's
+  track, which moved that track onto the wrong number and lost a 112721. Fragments
+  are now absorbed by their own track before any pairing.
+- **Cryo/Anemo hue border.** The border at hue 175 cut through Cryo glyphs (hue
+  about 180, edge pixels blended towards warm backgrounds), splitting digits into
+  two elements. It now sits at 168, midway between the two text colors.
+- **The 7 template.** The generic 7 scored about 0.5 against the game's 7, so small
+  numbers containing 7 were rejected. A template made from the captured glyph is
+  added as an alternate.
+- **CPU contention.** With every core busy, eight label workers at normal priority
+  took 44–74 ms per frame in a synthetic test (sixteen spinning processes) against
+  4 ms idle. The process now runs at above-normal priority class with at most four
+  workers, labels only the rows of the combat viewport, and uses a two-level color
+  table that stays in cache: 11–13 ms in the same test.
+- **GPU read-back.** Mapping a staging texture right after copying into it waits
+  for the GPU. Capture now alternates two staging textures and reads back the one
+  copied a frame earlier. `capture_bench` measures this path without the game:
+  about 2 ms per frame on an idle desktop.
+
+After these changes the same replay yields 30 hits, including every large hit of
+the burst. Still missed there: one of two small 677 hits behind a pop-in, and a
+stack of overlapping 384s of which one is read (as 381).
+
+The synthetic load test is harsher than a game and proves only the direction. The
+live effect has to be read from the panel: the status line shows frames per second,
+the footer the per-frame reading and capture times.
