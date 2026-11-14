@@ -25,7 +25,7 @@ pub enum CaptureOutcome {
     Unavailable,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FrameCrop {
     pub local_x: u32,
     pub local_y: u32,
@@ -110,6 +110,25 @@ impl ScreenCapture {
         }
 
         CaptureOutcome::Unavailable
+    }
+
+    /// Hand a processed frame's pixel buffer back so the next frame reuses it.
+    pub fn recycle(&mut self, frame: RawFrame) {
+        #[cfg(windows)]
+        if let Some(backend) = &mut self.backend {
+            backend.recycle(frame.data);
+        }
+        #[cfg(not(windows))]
+        drop(frame);
+    }
+
+    /// Milliseconds spent copying and reading back the last delivered frame.
+    pub fn last_copy_ms(&self) -> f64 {
+        #[cfg(windows)]
+        if let Some(backend) = &self.backend {
+            return backend.last_copy().as_secs_f64() * 1000.0;
+        }
+        0.0
     }
 }
 
