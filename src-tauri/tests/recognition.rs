@@ -66,6 +66,19 @@ fn reads_large_physical_impact_number_from_live_combat() {
 }
 
 #[test]
+fn reads_slanted_gradient_lunar_bloom_numbers() {
+    let engine = VisionEngine::new();
+    let hits = engine.detect_frame(&load("lunar-bloom.png"));
+    let values: Vec<_> = hits.iter().map(|h| (h.value, h.element)).collect();
+    assert_eq!(
+        values.len(),
+        3,
+        "Three unobstructed Lunar-Bloom 10941 numbers of different sizes: {hits:?}"
+    );
+    assert!(values.iter().all(|&v| v == (10941, ElementType::Dendro)));
+}
+
+#[test]
 fn confirms_a_complete_electro_number_once_across_recorded_frames() {
     let mut engine = VisionEngine::new();
     let start = std::time::Instant::now();
