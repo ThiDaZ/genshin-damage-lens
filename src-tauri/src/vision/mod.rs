@@ -10,6 +10,26 @@ use filter::ColorFilter;
 use std::time::Instant;
 use tracker::{ConfirmedHit, Detection, HitTracker};
 
+/// Ask the scheduler to prefer this process over ordinary work.
+///
+/// The game and a recorder keep every core busy. At normal priority the
+/// capture thread and the short-lived workers it starts for each frame then
+/// wait whole scheduler slices for a core, and a frame that needs a few
+/// milliseconds of work takes tens. Raising the process class (rather than
+/// single threads) matters because new threads start at the class default:
+/// a worker that had to raise itself would first wait in line to do so.
+/// One step above normal is enough to be scheduled promptly, and the work per
+/// frame is far too small to take anything noticeable from the game.
+pub fn prefer_this_process() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+        };
+        let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+}
+
 pub struct VisionEngine {
     matcher: DigitMatcher,
     tracker: HitTracker,
