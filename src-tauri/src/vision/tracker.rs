@@ -37,6 +37,9 @@ const NUMBER_LIFETIME: Duration = Duration::from_millis(1600);
 const MIN_VISIBLE: Duration = Duration::from_millis(60);
 /// Text that never moves or resizes for this long is HUD, not damage.
 const STATIC_LIMIT: Duration = Duration::from_millis(2500);
+/// A number covered this soon after it appeared may count on a steady drift
+/// that is still too short to prove it moved.
+const BRIEF: Duration = Duration::from_millis(500);
 const VOTE_WINDOW: usize = 64;
 
 fn digits_contain(whole: u32, part: u32) -> bool {
@@ -245,6 +248,27 @@ impl TrackedHit {
         !self.emitted && !self.suppressed && self.moved
     }
 
+    /// A settled number floats slowly, about a pixel per frame. In a burst the
+    /// next hit pops in over it before it has covered the distance that proves
+    /// movement. HUD text does not float: its box sits still or jitters back
+    /// and forth. So a short track also counts as moving when every step went
+    /// the same way and the steps add up to two thirds of that distance.
+    fn drifted(&self, scale: f32) -> bool {
+        if self.observations.len() < 4 {
+            return false;
+        }
+        let centers: Vec<(f32, f32)> = self.observations.iter().map(center).collect();
+        let (first, last) = (centers[0], centers[centers.len() - 1]);
+        let steady = |axis: fn(&(f32, f32)) -> f32| {
+            let net = axis(&last) - axis(&first);
+            net.abs() >= 2.0 * scale
+                && centers
+                    .windows(2)
+                    .all(|w| (axis(&w[1]) - axis(&w[0])) * net.signum() >= 0.0)
+        };
+        steady(|c| c.0) || steady(|c| c.1)
+    }
+
     /// Two-digit readings are what sparks and foliage most often look like.
     /// A real one is read in most frames; noise flickers in and out.
     fn plausible(&self, value: u32) -> bool {
@@ -266,7 +290,7 @@ impl TrackedHit {
 
     /// Last chance when the number disappears: readings that were too noisy
     /// for a clear majority still count when one value kept recurring.
-    fn confirm_on_expiry(&mut self, now: Instant) {
+    fn confirm_on_expiry(&mut self, now: Instant, scale: f32) {
         // In a burst of hits each number is readable only until the next one
         // pops in over it, so the bar is time on screen, not a frame count:
         // capture may run at 20 or at 60 frames a second.
@@ -274,6 +298,15 @@ impl TrackedHit {
         if self.eligible(now) && seen_for >= MIN_VISIBLE {
             let voted = self.vote(3, 0.40).or_else(|| self.repeated_long_reading());
             if let Some((value, crit)) = voted.filter(|v| self.plausible(v.0)) {
+                self.emit(value, crit);
+            }
+        } else if !self.emitted
+            && !self.suppressed
+            && (MIN_VISIBLE..=BRIEF).contains(&seen_for)
+            && self.drifted(scale)
+        {
+            // Less proof of movement, so more agreement between readings.
+            if let Some((value, crit)) = self.vote(4, 0.75).filter(|v| v.0 >= 100) {
                 self.emit(value, crit);
             }
         }
@@ -309,6 +342,8 @@ pub struct HitTracker {
     active_tracks: Vec<TrackedHit>,
     last_update: Option<Instant>,
     frame: u64,
+    /// Resolution scale of the latest frame, for tracks that end between frames.
+    scale: f32,
     /// Print tracks that end without a confirmed hit (diagnostics only).
     pub trace: bool,
 }
@@ -325,6 +360,7 @@ impl HitTracker {
             active_tracks: Vec::with_capacity(32),
             last_update: None,
             frame: 0,
+            scale: 1.0,
             trace: false,
         }
     }
@@ -338,7 +374,7 @@ impl HitTracker {
             if !t.finished(now) || t.emitted {
                 continue;
             }
-            t.confirm_on_expiry(now);
+            t.confirm_on_expiry(now, self.scale);
             if self.trace && !t.emitted && t.observations.len() >= 2 {
                 let values: Vec<u32> = t.observations.iter().map(|d| d.value).collect();
                 eprintln!(
@@ -437,6 +473,7 @@ impl HitTracker {
         } else {
             1.0
         };
+        self.scale = scale;
         let mut confirmed = Vec::new();
         self.expire(now, &mut confirmed);
         let valid: Vec<_> = detections
@@ -1010,6 +1047,35 @@ mod tests {
             .advance_time(start + Duration::from_secs(2))
             .is_empty());
         assert!(tracker.active_tracks.is_empty());
+    }
+
+    #[test]
+    fn number_covered_while_it_floats_is_confirmed() {
+        // Recorded at 1080p: a 7715 floats up a pixel per frame and is covered
+        // by the next hit after five readings, four pixels from where it began.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for (ms, y) in [(0, 295), (33, 294), (100, 292), (133, 291), (166, 291)] {
+            hits.extend(tracker.update_at(&[detection(7715, 943, y)], 1.5, at(start, ms)));
+        }
+        hits.extend(tracker.advance_time(at(start, 2000)));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].value, 7715);
+    }
+
+    #[test]
+    fn jittering_text_is_not_a_floating_number() {
+        // The same readings with the box hopping back and forth, as HUD text
+        // does when its outline flickers.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for (ms, y) in [(0, 295), (33, 292), (100, 295), (133, 291), (166, 294)] {
+            hits.extend(tracker.update_at(&[detection(7715, 943, y)], 1.5, at(start, ms)));
+        }
+        hits.extend(tracker.advance_time(at(start, 2000)));
+        assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]

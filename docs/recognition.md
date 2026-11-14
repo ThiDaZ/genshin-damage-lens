@@ -258,3 +258,42 @@ and Lunar-Crystallize were not examined. Live capture was not retested.
 
 Still open, and older than this change: the green enemy label "Lv. 100" is read
 as a Dendro 100, and green healing numbers ("+1543") are counted as Dendro damage.
+
+## Stacked equal hits in a pale arena (2026-11-14, second recording)
+
+`2026-11-14 21-36-37.mp4` is a Nefer fight in an arena with pale green walls.
+Counting by eye from contact sheets (approximate, not a labeled set), about 33
+numbers are legible. The recognizer counted 25, two of them wrong values (a
+"109" from a 4409 that was half covered while popping in, a "994" from a 9942
+whose last digit was under the next number).
+
+What goes wrong, in order of effect:
+
+- **Equal numbers on top of each other.** Nefer's hits land as two or three
+  equal numbers within a quarter of a second. Each one pops in several times
+  its final size over the others, and some settle one digit apart: two 95922
+  read as "959222" to the eye and as fragments ("922", "95") to the reader.
+  Three 29274 gave two hits: the third popped in over the fading first, then
+  settled where bright wall ornaments cross it, and was only ever read as
+  "2927", "274" and "20274". Nothing here separates touching glyphs of two
+  numbers; clusters assume one number per row of glyphs.
+- **Wall ornaments in Lunar-Bloom colors.** The walls carry bright lines two to
+  four pixels wide in the same pale green as the top of a Lunar-Bloom digit
+  (the wall has 33-42 % saturation, the text 28-36 % in recorded video). Where
+  a number drifts across them its digits are chained to the lines. Three ways
+  of cutting them off were tried and reverted, because each lost hits in
+  `2026-11-14 20-39-26.mp4` (65 before): a saturation limit of 32 % (50 hits), a
+  text core of at most 32 % with a limited rim of the rest (57), and treating
+  runs shorter than three or four pixels as rim only (58, 57). Small
+  Lunar-Bloom numbers have strokes as thin as the lines.
+- **A steady number covered early.** A 7715 was read five times in a row and
+  dropped: it had floated four pixels, under the 4.5 px that mark a track as
+  moving at 1080p, when the next hit covered it. A track seen for at most half
+  a second now also counts when all of its steps went one way and add up to
+  two pixels per scale unit, with four agreeing readings of a value of at
+  least 100. Text whose box jitters back and forth still does not count. This
+  recovers that hit; the other twelve recordings are unchanged.
+
+The result is 26 hits, 24 of them right. The stacked numbers need a reader
+that can take apart overlapping glyphs, which is the recognizer decision
+described above rather than another threshold.
