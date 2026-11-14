@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GenshinDamageLens</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="main.js"></script>
+  </head>
+
+  <body>
+    <!-- One compact panel. The rest of the window stays transparent over the game. -->
+    <main class="panel" id="panel" data-status="unavailable">
+      <header class="bar" id="drag-handle">
+        <span class="status-dot" id="status-dot"></span>
+        <div class="bar-text">
+          <span class="title">Damage Lens</span>
+          <span class="status" id="status-text">Waiting for game</span>
+        </div>
+
+        <div class="bar-actions">
+          <button class="icon-btn" id="btn-pause" title="Pause capture" aria-label="Pause capture">
+            <svg viewBox="0 0 16 16" id="icon-pause"><path d="M4.5 3h2v10h-2zM9.5 3h2v10h-2z" /></svg>
+            <svg viewBox="0 0 16 16" id="icon-play" hidden><path d="M4.5 2.8v10.4L13 8z" /></svg>
+          </button>
+          <button class="icon-btn" id="btn-reset" title="Reset session" aria-label="Reset session">
+            <svg viewBox="0 0 16 16">
+              <path
+                d="M8 2.5a5.5 5.5 0 1 0 5.3 7h-1.6A4 4 0 1 1 8 4c1 0 2 .4 2.7 1L9 6.8h4.5V2.3l-1.7 1.7A5.5 5.5 0 0 0 8 2.5z"
+              />
+            </svg>
+          </button>
+          <button class="icon-btn" id="btn-compact" title="Compact view" aria-label="Compact view">
+            <svg viewBox="0 0 16 16"><path d="M3 5.5h10v1.5H3zM3 9h10v1.5H3z" /></svg>
+          </button>
+          <button class="icon-btn" id="btn-more" title="More" aria-label="More" aria-expanded="false">
+            <svg viewBox="0 0 16 16">
+              <circle cx="3.5" cy="8" r="1.4" />
+              <circle cx="8" cy="8" r="1.4" />
+              <circle cx="12.5" cy="8" r="1.4" />
+            </svg>
+          </button>
+          <button class="lock-btn" id="btn-clickthrough" title="Let clicks pass through to the game (F8)">
+            <svg viewBox="0 0 16 16">
+              <path d="M5 7V5a3 3 0 0 1 6 0v2h1v6.5H4V7zm1.5 0h3V5a1.5 1.5 0 0 0-3 0z" />
+            </svg>
+            <span>F8</span>
+          </button>
+        </div>
+
+        <div class="menu" id="menu" hidden>
+          <button class="menu-item" id="btn-simulate">Add a test hit</button>
+          <button class="menu-item" id="btn-auto-sim">Run demo combat</button>
+          <button class="menu-item" id="btn-recordings" title="Lets OBS or Streamlabs capture the panel">
+            Show in recordings
+          </button>
+          <button class="menu-item" id="btn-recenter">Move panel back to default spot</button>
+        </div>
+      </header>
+
+      <!-- Shown instead of the buttons while clicks pass through to the game -->
+      <div class="lock-hint" id="lock-hint">Click-through on · press F8 to use the panel</div>
+
+      <section class="hero">
+        <div class="hero-main">
+          <span class="label">DPS · last 5 s</span>
+          <span class="dps" id="dps-display">0</span>
+        </div>
+        <svg class="spark" id="spark" viewBox="0 0 120 40" preserveAspectRatio="none" aria-hidden="true">
+          <path class="spark-area" id="spark-area" d="" />
+          <path class="spark-line" id="spark-line" d="" />
+        </svg>
+      </section>
+
+      <section class="tiles">
+        <div class="tile">
+          <span class="label">Total</span>
+          <span class="tile-value" id="total-damage-display">0</span>
+        </div>
+        <div class="tile">
+          <span class="label">Avg DPS</span>
+          <span class="tile-value" id="avg-dps-display">0</span>
+        </div>
+        <div class="tile">
+          <span class="label">Hits</span>
+          <span class="tile-value" id="total-hits-display">0</span>
+        </div>
+        <div class="tile">
+          <span class="label">Crit</span>
+          <span class="tile-value" id="crit-rate-display">0%</span>
+        </div>
+      </section>
+
+      <div class="details" id="details">
+        <section class="peaks">
+          <div class="peak">
+            <span class="label">Peak hit</span>
+            <span class="peak-value" id="peak-display">–</span>
+            <span class="chip" id="peak-element-badge" hidden></span>
+          </div>
+          <div class="peak">
+            <span class="label">Peak DPS</span>
+            <span class="peak-value" id="peak-dps-display">–</span>
+          </div>
+        </section>
+
+        <section class="elements">
+          <div class="section-head">
+            <span class="label">Damage by element</span>
+          </div>
+          <div class="stack" id="elemental-bar"></div>
+          <div class="legend" id="element-legend"></div>
+        </section>
+
+        <section class="feed">
+          <div class="section-head">
+            <span class="label">Recent hits</span>
+            <span class="label" id="feed-count"></span>
+          </div>
+          <div class="feed-list" id="hit-ticker-list">
+            <div class="empty">Hits appear here about half a second after the number shows in game.</div>
+          </div>
+        </section>
+      </div>
+
+      <footer class="foot" id="capture-details">No capture yet</footer>
+    </main>
+  </body>
+</html>

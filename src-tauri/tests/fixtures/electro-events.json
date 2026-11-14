@@ -1,0 +1,11 @@
+{
+  "mode": "events",
+  "frames": [
+    { "path": "electro-000.png", "timestamp_ms": 0 },
+    { "path": "electro-100.png", "timestamp_ms": 100 },
+    { "path": "electro-300.png", "timestamp_ms": 300 }
+  ],
+  "expected_hits": [
+    { "value": 2066, "element": "electro", "start_ms": 0, "end_ms": 350, "x": 1283, "y": 496, "radius": 120 }
+  ]
+}

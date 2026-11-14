@@ -1,0 +1,14 @@
+{
+  "mode": "frames",
+  "frames": [
+    { "path": "pyro-over-effects.png", "timestamp_ms": 0 },
+    { "path": "physical-in-geo-sequence.png", "timestamp_ms": 1000 },
+    { "path": "no-damage.png", "timestamp_ms": 2000 }
+  ],
+  "expected_hits": [
+    { "value": 4046, "element": "pyro", "start_ms": 0, "end_ms": 0, "x": 494, "y": 232, "radius": 20 },
+    { "value": 14229, "element": "pyro", "start_ms": 0, "end_ms": 0, "x": 614, "y": 276, "radius": 20 },
+    { "value": 261, "element": "physical", "start_ms": 1000, "end_ms": 1000, "x": 930, "y": 484, "radius": 20 },
+    { "value": 261, "element": "physical", "start_ms": 1000, "end_ms": 1000, "x": 877, "y": 566, "radius": 25 }
+  ]
+}

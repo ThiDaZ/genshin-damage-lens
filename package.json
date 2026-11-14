@@ -1,0 +1,17 @@
+{
+  "name": "genshin-damage-lens",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "run.cmd dev",
+    "build": "run.cmd build",
+    "tauri": "run.cmd"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1"
+  }
+}
