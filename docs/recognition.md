@@ -124,3 +124,77 @@ Treat the table as a before/after comparison, not an accuracy figure.
 
 The live confirmation delay is 0.6 s. Offline event manifests must flush the engine
 after the last frame (the `replay` example does) so numbers still on screen confirm.
+
+## Burst hits and live load (2026-11-13 recording)
+
+A 1080p recording made with the overlay visible showed its own diagnostics:
+about 21 fps and 22.6 ms per frame, against 6–7 ms in offline replays. Replaying
+that recording (`--mask 0,330,340,510` blanks the panel) found 21 hits where about
+30 numbers are readable. The causes, in order of effect:
+
+- **Evidence thresholds tied to frame count.** A number in a burst is readable only
+  until the next one pops in over it, often 100–130 ms. A rule of "six readings or
+  150 ms" tuned on 60 fps recordings dropped numbers read four or five times at
+  20–30 fps. The bar is now 60 ms on screen with three agreeing readings, or a
+  number of four or more digits read whole in its last two frames.
+- **Overlapping numbers traded fragments.** When two numbers overlap, each loses
+  digits to the other for a frame. The fragment of one was paired with the other's
+  track, which moved that track onto the wrong number and lost a 112721. Fragments
+  are now absorbed by their own track before any pairing.
+- **Cryo/Anemo hue border.** The border at hue 175 cut through Cryo glyphs (hue
+  about 180, edge pixels blended towards warm backgrounds), splitting digits into
+  two elements. It now sits at 168, midway between the two text colors.
+- **The 7 template.** The generic 7 scored about 0.5 against the game's 7, so small
+  numbers containing 7 were rejected. A template made from the captured glyph is
+  added as an alternate.
+- **CPU contention.** With every core busy, eight label workers at normal priority
+  took 44–74 ms per frame in a synthetic test (sixteen spinning processes) against
+  4 ms idle. The process now runs at above-normal priority class with at most four
+  workers, labels only the rows of the combat viewport, and uses a two-level color
+  table that stays in cache: 11–13 ms in the same test.
+- **GPU read-back.** Mapping a staging texture right after copying into it waits
+  for the GPU. Capture now alternates two staging textures and reads back the one
+  copied a frame earlier. `capture_bench` measures this path without the game:
+  about 2 ms per frame on an idle desktop.
+
+After these changes the same replay yields 30 hits, including every large hit of
+the burst. Still missed there: one of two small 677 hits behind a pop-in, and a
+stack of overlapping 384s of which one is read (as 381).
+
+The synthetic load test is harsher than a game and proves only the direction. The
+live effect has to be read from the panel: the status line shows frames per second,
+the footer the per-frame reading and capture times.
+
+## Piles of small hits and raw-frame cost (2026-11-14 recording)
+
+The 2026-11-14 recording was read about equally live and in replay (38 hits
+each; roughly 46 numbers are legible in it), while the panel reported 22–32 ms
+of reading time per frame and 27–38 fps with a recorder running. Two findings:
+
+- **Raw captures cost more than video frames.** Replays of recordings took about
+  10 ms per frame, but the raw DXGI frames saved by `capture_probe` took 15.6 ms
+  on an idle machine (p95 23 ms): uncompressed pixels produce more runs and
+  more candidate components. CPU load from the game and recorder roughly doubles
+  that. The digit splitter now derives each candidate box from per-column
+  statistics instead of rescanning and copying the mask, and the labeling loop
+  classifies and cuts runs in two tight passes. The same raw frames now take
+  7.9 ms (p95 10.8 ms). With every core kept busy by a synthetic load they take
+  about 20 ms.
+- **Piles of small hits.** A multi-hit attack can put nine numbers of 22–25 px in
+  one spot (seven 384s and a 351 in the 2026-11-13 recording). Several are hidden
+  under others and cannot be read by anyone. Of the legible ones the reader got
+  one, as "381": readings of a 351 and of a 384 thirty pixels away were voted
+  into one track digit by digit. A track that has read one value three times now
+  refuses a reading that differs by more than one digit and sits off its spot;
+  that reading starts its own track. White text also lost its anti-aliased edge
+  over warm floors because Physical accepted only near-pure white; warm-tinted
+  white up to 16 % saturation is now accepted, which keeps small digits whole.
+  The pile now yields 331 (the 351 with one digit wrong) and 384.
+
+A reading that adds two or more digits to the majority reading must now be seen
+at least as often as that reading. A neighbor's digits glued to the front of a
+number had produced a 902752 from a 2752 next to a 906.
+
+Still open: hits fully covered by others in a pile are not counted, and digits of
+22–25 px score only 0.5–0.8 against the templates, so small numbers are read in
+fewer frames than large ones.

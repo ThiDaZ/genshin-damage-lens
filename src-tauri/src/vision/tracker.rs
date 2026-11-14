@@ -33,12 +33,24 @@ const CONFIRM_DELAY: Duration = Duration::from_millis(600);
 /// A damage number is on screen for roughly 1.3 s. A confirmed track is kept
 /// that long so a number hidden by an effect is not counted again on return.
 const NUMBER_LIFETIME: Duration = Duration::from_millis(1600);
+/// Shortest time a number must be seen to count when it vanishes early.
+const MIN_VISIBLE: Duration = Duration::from_millis(60);
 /// Text that never moves or resizes for this long is HUD, not damage.
 const STATIC_LIMIT: Duration = Duration::from_millis(2500);
 const VOTE_WINDOW: usize = 64;
 
 fn digits_contain(whole: u32, part: u32) -> bool {
     whole != part && whole.to_string().contains(&part.to_string())
+}
+
+/// Could `b` be a reading of the number `a`? The same value, a fragment or a
+/// longer reading of it, or the same length with a single digit misread.
+fn digits_related(a: u32, b: u32) -> bool {
+    if a == b || digits_contain(a, b) || digits_contain(b, a) {
+        return true;
+    }
+    let (a, b) = (a.to_string(), b.to_string());
+    a.len() == b.len() && a.bytes().zip(b.bytes()).filter(|(x, y)| x != y).count() <= 1
 }
 
 fn center(d: &Detection) -> (f32, f32) {
@@ -170,10 +182,15 @@ impl TrackedHit {
                     (d.value, same.count())
                 })
                 .max_by_key(|c| c.1)
-                .map_or(0, |c| c.0);
+                .unwrap_or((0, 0));
+            // Two or more extra digits multiply the value a hundredfold. A
+            // neighbor's digits glued on can repeat for a few frames, so such
+            // a reading must also be seen at least as often as the fragment.
+            let trusted = longer == majority + 1 || repeats >= fragment.1;
             if repeats >= 3
                 && repeats * 5 >= count[longer] * 3
-                && digits_contain(candidate, fragment)
+                && trusted
+                && digits_contain(candidate, fragment.0)
             {
                 len = longer;
                 break;
@@ -250,15 +267,29 @@ impl TrackedHit {
     /// Last chance when the number disappears: readings that were too noisy
     /// for a clear majority still count when one value kept recurring.
     fn confirm_on_expiry(&mut self, now: Instant) {
-        // A few frames of agreement is how scenery noise looks, too.
+        // In a burst of hits each number is readable only until the next one
+        // pops in over it, so the bar is time on screen, not a frame count:
+        // capture may run at 20 or at 60 frames a second.
         let seen_for = self.last_seen.saturating_duration_since(self.created_at);
-        if self.eligible(now)
-            && (seen_for >= Duration::from_millis(150) || self.observations.len() >= 6)
-        {
-            if let Some((value, crit)) = self.vote(3, 0.40).filter(|v| self.plausible(v.0)) {
+        if self.eligible(now) && seen_for >= MIN_VISIBLE {
+            let voted = self.vote(3, 0.40).or_else(|| self.repeated_long_reading());
+            if let Some((value, crit)) = voted.filter(|v| self.plausible(v.0)) {
                 self.emit(value, crit);
             }
         }
+    }
+
+    /// A number of four or more digits that came into view digit by digit and
+    /// was then read whole in the last two frames before it vanished. Noise
+    /// does not repeat that many digits, and junk glued to a number changes.
+    fn repeated_long_reading(&self) -> Option<(u32, bool)> {
+        let n = self.observations.len();
+        if n < 3 {
+            return None;
+        }
+        let last = self.observations[n - 1];
+        (last.value >= 1000 && self.observations[n - 2].value == last.value)
+            .then_some((last.value, last.is_crit))
     }
 
     /// No longer a candidate for new readings.
@@ -339,6 +370,28 @@ impl HitTracker {
                         <= NUMBER_LIFETIME
                     && other.last_seen < track.created_at
             });
+            // A short-lived misreading of a number that has its own track: the
+            // first frames of a pop-in often read only some of its digits.
+            let fragment = self.active_tracks.iter().enumerate().any(|(j, other)| {
+                if j == i || other.last.element != hit.element || other.suppressed {
+                    return false;
+                }
+                let whole = other
+                    .emitted_value
+                    .or_else(|| other.vote(1, 0.0).map(|v| v.0))
+                    .unwrap_or(other.last.value);
+                let apart = if other.created_at > track.created_at {
+                    other.created_at.saturating_duration_since(track.created_at)
+                } else {
+                    track.created_at.saturating_duration_since(other.created_at)
+                };
+                let (tx, ty) = center(&track.last);
+                let near = [&other.first, &other.last].iter().any(|d| {
+                    let (ox, oy) = center(d);
+                    (tx - ox).abs() <= d.width as f32 && (ty - oy).abs() <= d.height as f32 * 1.5
+                });
+                digits_contain(whole, hit.value) && apart <= NUMBER_LIFETIME && near
+            });
             if self.trace {
                 let values: Vec<u32> = track.observations.iter().map(|d| d.value).collect();
                 eprintln!(
@@ -353,10 +406,15 @@ impl HitTracker {
                     values
                 );
             }
-            if !repeat {
+            if repeat || fragment {
+                if self.trace {
+                    let why = if repeat { "repeat" } else { "fragment" };
+                    eprintln!("[{why} dropped] {} {:?}", hit.value, hit.element);
+                }
+                // Not a hit of its own, and no guard for later ones either.
+                self.active_tracks[i].emitted_value = None;
+            } else {
                 out.push(hit);
-            } else if self.trace {
-                eprintln!("[repeat dropped] {} {:?}", hit.value, hit.element);
             }
         }
     }
@@ -404,6 +462,42 @@ impl HitTracker {
             .map(|t| t.vote(1, 0.0).map_or(t.last.value, |v| v.0))
             .collect();
 
+        // A track that has read one value three times is that number. In a
+        // pile of small hits its neighbors sit a few pixels away; a reading
+        // that differs by more than one digit is one of them, not a misread,
+        // and must not be voted into this track digit by digit.
+        let locked: Vec<bool> = self
+            .active_tracks
+            .iter()
+            .zip(&known)
+            .map(|(t, &value)| t.observations.iter().filter(|d| d.value == value).count() >= 3)
+            .collect();
+        let mut used_tracks = vec![false; self.active_tracks.len()];
+        let mut used_detections = vec![false; valid.len()];
+
+        // Fragments first. When two numbers overlap, each loses digits to the
+        // other; left for the pairing below, the fragment of one would be taken
+        // for a new reading of its neighbor and drag that track off its number.
+        for (di, d) in valid.iter().enumerate() {
+            let (cx, cy) = center(d);
+            for (ti, track) in self.active_tracks.iter_mut().enumerate() {
+                if track.last.element != d.element || !digits_contain(known[ti], d.value) {
+                    continue;
+                }
+                let (px, py) = track.predicted_center(now);
+                let (lx, ly) = center(&track.last);
+                let half_w = track.last.width.max(d.width) as f32 * 0.75 + 8.0 * scale;
+                let half_h = track.last.height.max(d.height) as f32 * 0.5 + 8.0 * scale;
+                let inside = |x: f32, y: f32| (cx - x).abs() <= half_w && (cy - y).abs() <= half_h;
+                if inside(px, py) || inside(lx, ly) {
+                    // A fragment keeps the track alive without voting.
+                    track.last_support = now;
+                    used_detections[di] = true;
+                    break;
+                }
+            }
+        }
+
         // Global greedy assignment: a track and detection can each be used only once.
         let mut pairs = Vec::new();
         for (ti, track) in self.active_tracks.iter().enumerate() {
@@ -411,11 +505,11 @@ impl HitTracker {
             let gap = since_seen.as_secs_f32();
             let (px, py) = track.predicted_center(now);
             for (di, d) in valid.iter().enumerate() {
-                if d.element != track.last.element {
+                if used_detections[di] || d.element != track.last.element {
                     continue;
                 }
-                // A shorter reading inside a known number is a fragment; it
-                // must not shrink the track's box. Handled below.
+                // A shorter reading of this number found elsewhere is not
+                // evidence for it either.
                 if digits_contain(known[ti], d.value) {
                     continue;
                 }
@@ -423,6 +517,20 @@ impl HitTracker {
                 // Consecutive hits of one attack often differ by a digit or
                 // two, so near-equal values are no evidence of identity.
                 let same = d.value == track.last.value || d.value == known[ti];
+                if !same && locked[ti] && !digits_related(known[ti], d.value) {
+                    // Junk glued to this number, or several digits misread,
+                    // still sits on the number's own spot. A neighbor is
+                    // offset by a good part of the number's size.
+                    let (dx, dy) = center(d);
+                    let (lx, ly) = center(&track.last);
+                    let off_x = (dx - px).abs().min((dx - lx).abs());
+                    let off_y = (dy - py).abs().min((dy - ly).abs());
+                    if off_x > track.last.width as f32 * 0.6
+                        || off_y > track.last.height as f32 * 0.6
+                    {
+                        continue;
+                    }
+                }
                 // A lingering track only guards against its own number, and
                 // only while that number could still be on screen.
                 if since_seen > TRACK_GAP
@@ -473,8 +581,6 @@ impl HitTracker {
             }
         }
         pairs.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-        let mut used_tracks = vec![false; self.active_tracks.len()];
-        let mut used_detections = vec![false; valid.len()];
         for (_, ti, di) in pairs {
             if used_tracks[ti] || used_detections[di] {
                 continue;
@@ -736,6 +842,109 @@ mod tests {
             hits.iter().map(|h| h.value).collect::<Vec<_>>(),
             [13440, 13978]
         );
+    }
+
+    #[test]
+    fn overlapping_numbers_do_not_trade_fragments() {
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        // Both drift down with the camera.
+        let a =
+            |value: u32, step: u64, width: u32| sized(value, 1094, 590 + step as i32 * 3, width);
+        let b =
+            |value: u32, step: u64, width: u32| sized(value, 1060, 636 + step as i32 * 3, width);
+        for i in 0..3 {
+            hits.extend(tracker.update_at(
+                &[a(104702, i, 180), b(112721, i, 180)],
+                1.0,
+                at(start, i * 33),
+            ));
+        }
+        // Each hides part of the other for a frame.
+        hits.extend(tracker.update_at(&[a(4702, 3, 120), b(12721, 3, 150)], 1.0, at(start, 99)));
+        for i in 4..12 {
+            hits.extend(tracker.update_at(
+                &[a(104702, i, 180), b(112721, i, 180)],
+                1.0,
+                at(start, i * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        hits.sort_by_key(|h| h.value);
+        assert_eq!(
+            hits.iter().map(|h| h.value).collect::<Vec<_>>(),
+            [104702, 112721]
+        );
+    }
+
+    #[test]
+    fn brief_burst_hit_counts_at_low_frame_rates() {
+        // Four readings at 30 fps, then the next number covers it.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for i in 0..4 {
+            hits.extend(tracker.update_at(
+                &[detection(1341, 940, 520 + i * 4)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert_eq!(hits.iter().map(|h| h.value).collect::<Vec<_>>(), [1341]);
+
+        // A long number that came into view digit by digit, read whole twice.
+        let mut tracker = HitTracker::new();
+        let mut hits = Vec::new();
+        for (i, value) in [254, 2848, 25480, 25480].into_iter().enumerate() {
+            hits.extend(tracker.update_at(
+                &[detection(value, 1010, 660 + i as i32 * 4)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert_eq!(hits.iter().map(|h| h.value).collect::<Vec<_>>(), [25480]);
+
+        // Two frames are still too little.
+        let mut tracker = HitTracker::new();
+        let mut hits = Vec::new();
+        for i in 0..2 {
+            hits.extend(tracker.update_at(
+                &[detection(28727, 1010, 560 + i * 4)],
+                1.0,
+                at(start, i as u64 * 17),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn neighbor_in_a_pile_is_not_voted_into_a_known_number() {
+        // 351 is read a few times, vanishes under the pile, and a 384 thirty
+        // pixels away becomes readable. Two hits, not one "381".
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for i in 0..5 {
+            hits.extend(tracker.update_at(
+                &[detection(351, 955, 716 - i * 2)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        for i in 5..14 {
+            hits.extend(tracker.update_at(
+                &[detection(384, 909, 680 - i * 2)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        hits.sort_by_key(|h| h.value);
+        assert_eq!(hits.iter().map(|h| h.value).collect::<Vec<_>>(), [351, 384]);
     }
 
     #[test]

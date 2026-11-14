@@ -97,6 +97,14 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
     if s <= 8 && v >= 85 {
         return Some(ElementType::Physical);
     }
+    // White text over the warm stone and sand that fill most arenas: the
+    // anti-aliased edge of every stroke is white blended with the floor. With
+    // the strict test alone those pixels are dropped, which thins small digits
+    // until they no longer match. Warm hues only, and still far paler than Geo
+    // (S >= 30) or Pyro (S >= 40) text.
+    if s <= 16 && v >= 85 && (10..=54).contains(&h) {
+        return Some(ElementType::Physical);
+    }
 
     // Electro: Violet / Magenta / Lavender / Pink
     if (245..=341).contains(&h) && s >= 10 && v >= 60 {
@@ -108,15 +116,18 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
         return Some(ElementType::Dendro);
     }
 
-    // Anemo: Turquoise / Mint
-    if (156..=175).contains(&h) && s >= 18 && v >= 60 {
+    // Anemo: Turquoise / Mint (text hue is about 160).
+    // The border with Cryo (text hue about 180) sits midway between the two.
+    // At 175 it cut straight through Cryo glyphs whose edge pixels blend with
+    // a warm background, splitting each digit into two elements.
+    if (156..=167).contains(&h) && s >= 18 && v >= 60 {
         return Some(ElementType::Anemo);
     }
 
     // Cryo vs Hydro:
     // Cryo is pale icy cyan with low saturation (S <= 50%).
     // Hydro is saturated ocean blue (S > 50% in 193..=205, or any S >= 18 in 206..=244).
-    if (176..=205).contains(&h) && s >= 12 && s <= 50 && v >= 65 {
+    if (168..=205).contains(&h) && s >= 12 && s <= 50 && v >= 65 {
         return Some(ElementType::Cryo);
     }
     if ((193..=205).contains(&h) && s > 50 && v >= 60)
@@ -182,6 +193,25 @@ fn element_of_label(label: u8) -> Option<ElementType> {
     ELEMENTS.get((label.checked_sub(1)? >> 1) as usize).copied()
 }
 
+/// Threads used to label a frame. Four at most, and never more than half the
+/// logical cores: next to a game and a recorder that keep every core busy,
+/// more threads only wait for each other. Measured with all cores loaded,
+/// eight workers took about twice as long per frame as four. `GDL_WORKERS`
+/// overrides the choice for experiments.
+fn label_workers() -> usize {
+    static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        std::env::var("GDL_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(|| {
+                let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+                (cores / 2).clamp(1, 4)
+            })
+    })
+}
+
 /// A maximal horizontal stretch of equally labeled pixels.
 struct Run {
     x0: u32,
@@ -209,58 +239,75 @@ fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
     let x_min = (w as f32 * 0.06) as usize;
     let x_max = (w as f32 * 0.94) as usize;
 
+    // The skill zone is everything right of one column.
+    let skill_from = zones
+        .columns
+        .iter()
+        .position(|c| c & SKILL_ZONE != 0)
+        .unwrap_or(w);
+
     let mut labels = vec![0u8; w * h];
-    let workers = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 8);
-    let band = h.div_ceil(workers).max(1);
+    let workers = label_workers();
+    // Rows far above or below the combat viewport cannot hold an accepted
+    // component: anything reaching past the 8 % / 91 % lines is rejected. One
+    // row beyond each line is kept so such a component is still seen crossing.
+    let row_lo = ((h as f32 * 0.08).ceil() as usize).saturating_sub(1);
+    let row_hi = ((h as f32 * 0.91) as usize + 2).min(h);
+    let band = (row_hi - row_lo).div_ceil(workers).max(1);
     let mut runs = Vec::new();
     std::thread::scope(|scope| {
-        let handles: Vec<_> = labels
+        let handles: Vec<_> = labels[row_lo * w..row_hi * w]
             .chunks_mut(band * w)
             .enumerate()
             .map(|(bi, chunk)| {
                 scope.spawn(move || {
                     let mut runs: Vec<Run> = Vec::with_capacity(4096);
                     for (ry, row) in chunk.chunks_exact_mut(w).enumerate() {
-                        let y = bi * band + ry;
+                        let y = row_lo + bi * band + ry;
                         let start = y * stride;
                         let pixels = &data[start..start + w * 4];
                         let zy = zones.rows[y];
                         let skill_row = zy & SKILL_ZONE != 0;
                         // The coarse scan only looks at even rows and columns.
                         let scan_row = y % 2 == 0 && (y_min..y_max).contains(&y);
-                        let mut open: Option<Run> = None;
-                        for (x, (label, px)) in
-                            row.iter_mut().zip(pixels.chunks_exact(4)).enumerate()
-                        {
+                        // Two tight passes: classify the row, then cut it
+                        // into runs. Mixing them kept the compiler from
+                        // producing a simple loop for either.
+                        for (label, px) in row.iter_mut().zip(pixels.chunks_exact(4)) {
                             // BGRA format from DXGI
-                            let mut value = table[usize::from(px[2]) << 16
-                                | usize::from(px[1]) << 8
-                                | usize::from(px[0])];
-                            // Skill icons and cooldown digits are a wall.
-                            if skill_row && zones.columns[x] & SKILL_ZONE != 0 {
-                                value = 0;
-                            }
-                            *label = value;
-                            if let Some(run) = &mut open {
-                                if run.label == value {
+                            *label = table.label(px[2], px[1], px[0]);
+                        }
+                        // Skill icons and cooldown digits are a wall.
+                        if skill_row {
+                            row[skill_from..].fill(0);
+                        }
+                        let mut x = 0;
+                        while x < w {
+                            // Background comes in long stretches: skip it
+                            // eight pixels at a time.
+                            if let Some(word) = row.get(x..x + 8) {
+                                if word == [0u8; 8] {
+                                    x += 8;
                                     continue;
                                 }
-                                run.x1 = x as u32;
-                                runs.extend(open.take());
                             }
-                            if value != 0 {
-                                open = Some(Run {
-                                    x0: x as u32,
-                                    x1: w as u32,
-                                    y: y as u32,
-                                    label: value,
-                                    seeded: false,
-                                });
+                            let value = row[x];
+                            if value == 0 {
+                                x += 1;
+                                continue;
                             }
+                            let x0 = x;
+                            while x < w && row[x] == value {
+                                x += 1;
+                            }
+                            runs.push(Run {
+                                x0: x0 as u32,
+                                x1: x as u32,
+                                y: y as u32,
+                                label: value,
+                                seeded: false,
+                            });
                         }
-                        runs.extend(open.take());
                         if scan_row {
                             for run in runs.iter_mut().rev().take_while(|r| r.y == y as u32) {
                                 let from = (run.x0 as usize).max(x_min).next_multiple_of(2);
@@ -281,28 +328,88 @@ fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
     (labels, runs)
 }
 
-/// Exact label for every 24-bit color, built once. Turns the per-pixel HSV
-/// classification into a single lookup.
-fn label_table() -> &'static [u8] {
-    static TABLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table = vec![0u8; 1 << 24];
+/// Exact label for every 24-bit color, built once, in two levels.
+///
+/// Colors are grouped into 16×16×16 blocks. Most blocks lie wholly inside one
+/// element's color range or wholly outside all of them, and are answered from
+/// a 4096-entry table that stays in the first-level cache. Only blocks that
+/// straddle a boundary keep their 4096 individual labels. A flat 16 MB table
+/// gave the same answers but missed the cache on most pixels.
+struct LabelTable {
+    /// Below `MIXED`: the label of a uniform block. Otherwise `MIXED` plus the
+    /// index of the block's own labels in `mixed`.
+    blocks: Box<[u16; 4096]>,
+    mixed: Vec<u8>,
+}
+
+const MIXED: u16 = 256;
+
+impl LabelTable {
+    #[inline(always)]
+    fn label(&self, r: u8, g: u8, b: u8) -> u8 {
+        // Three 4-bit fields: the index is below 4096 by construction, which
+        // lets the fixed-size table be read without a bounds check.
+        let block =
+            self.blocks[usize::from(r >> 4) << 8 | usize::from(g >> 4) << 4 | usize::from(b >> 4)];
+        if block < MIXED {
+            block as u8
+        } else {
+            self.mixed[usize::from(block - MIXED) << 12
+                | usize::from(r & 15) << 8
+                | usize::from(g & 15) << 4
+                | usize::from(b & 15)]
+        }
+    }
+
+    fn build() -> Self {
+        let block_labels = |block: usize| -> Vec<u8> {
+            let (r, g, b) = (block >> 8 << 4, (block >> 4 & 15) << 4, (block & 15) << 4);
+            (0..4096usize)
+                .map(|i| {
+                    label_pixel(
+                        (r | i >> 8) as u8,
+                        (g | (i >> 4 & 15)) as u8,
+                        (b | (i & 15)) as u8,
+                    )
+                })
+                .collect()
+        };
         let workers = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .clamp(1, 16);
-        let chunk = (1usize << 24).div_ceil(workers);
+        let per_worker = 4096usize.div_ceil(workers);
+        let mut parts: Vec<Vec<Vec<u8>>> = Vec::new();
         std::thread::scope(|scope| {
-            for (ci, part) in table.chunks_mut(chunk).enumerate() {
-                scope.spawn(move || {
-                    for (i, label) in part.iter_mut().enumerate() {
-                        let rgb = ci * chunk + i;
-                        *label = label_pixel((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
-                    }
-                });
+            let handles: Vec<_> = (0..workers)
+                .map(|wi| {
+                    scope.spawn(move || {
+                        (wi * per_worker..((wi + 1) * per_worker).min(4096))
+                            .map(block_labels)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for handle in handles {
+                parts.push(handle.join().expect("label table worker panicked"));
             }
         });
-        table
-    })
+        let mut blocks = Box::new([0u16; 4096]);
+        let mut mixed = Vec::new();
+        for (block, labels) in blocks.iter_mut().zip(parts.into_iter().flatten()) {
+            if labels.iter().all(|&l| l == labels[0]) {
+                *block = u16::from(labels[0]);
+            } else {
+                *block = MIXED + (mixed.len() >> 12) as u16;
+                mixed.extend_from_slice(&labels);
+            }
+        }
+        Self { blocks, mixed }
+    }
+}
+
+fn label_table() -> &'static LabelTable {
+    static TABLE: std::sync::OnceLock<LabelTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(LabelTable::build)
 }
 
 #[derive(Clone, Copy)]
@@ -1005,6 +1112,20 @@ mod tests {
         assert!(!ColorFilter::has_contrasting_stroke(
             &frame, 8, 8, 8, 16, &mask
         ));
+    }
+
+    #[test]
+    fn label_table_matches_direct_classification() {
+        let table = label_table();
+        // A coarse sweep plus every value near the brightness cut.
+        for r in (0..=255u8).step_by(3) {
+            for g in (0..=255u8).step_by(5) {
+                for b in (0..=255u8).step_by(7).chain(145..=150) {
+                    assert_eq!(table.label(r, g, b), label_pixel(r, g, b), "{r},{g},{b}");
+                }
+            }
+        }
+        assert!(table.mixed.len() < 8 << 20, "most blocks should be uniform");
     }
 
     #[test]
