@@ -245,6 +245,8 @@ fn spawn_hotkey_thread(app_handle: AppHandle, state: SharedState) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Stay responsive while the game and a recorder load every core.
+    vision::prefer_this_process();
     let shared_state: SharedState = Arc::new(parking_lot::Mutex::new(AppState::new()));
     let running = Arc::new(AtomicBool::new(true));
 
@@ -299,6 +301,7 @@ pub fn run() {
                 let mut diagnostic_candidates = 0usize;
                 let mut diagnostic_hits = 0usize;
                 let mut diagnostic_ocr_ms = 0.0;
+                let mut diagnostic_copy_ms = 0.0;
                 let mut diagnostic_size = (0, 0);
 
                 while running_clone.load(Ordering::Relaxed) {
@@ -343,7 +346,10 @@ pub fn run() {
                                 diagnostic_frames += 1;
                                 diagnostic_candidates += analysis.detections.len();
                                 diagnostic_ocr_ms += observed_at.elapsed().as_secs_f64() * 1000.0;
+                                diagnostic_copy_ms += capture.last_copy_ms();
                                 diagnostic_size = (frame.width, frame.height);
+                                // The pixel buffer goes back for the next frame.
+                                capture.recycle(frame);
                                 analysis.hits
                             }
                             CaptureOutcome::NoNewFrame => vision.no_new_frame(Instant::now()),
@@ -395,6 +401,11 @@ pub fn run() {
                             "width": diagnostic_size.0, "height": diagnostic_size.1,
                             "candidates": diagnostic_candidates, "hits": diagnostic_hits,
                             "processing_ms": average_ms,
+                            "capture_ms": if diagnostic_frames > 0 {
+                                diagnostic_copy_ms / f64::from(diagnostic_frames)
+                            } else {
+                                0.0
+                            },
                         });
                         if last_capture_status == "tracking" {
                             println!("[Capture diagnostics] {diagnostics}");
@@ -405,6 +416,7 @@ pub fn run() {
                         diagnostic_candidates = 0;
                         diagnostic_hits = 0;
                         diagnostic_ocr_ms = 0.0;
+                        diagnostic_copy_ms = 0.0;
                     }
 
                     if last_stats_emit.elapsed() >= Duration::from_millis(250) {
