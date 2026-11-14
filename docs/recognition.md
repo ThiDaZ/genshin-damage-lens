@@ -164,3 +164,37 @@ stack of overlapping 384s of which one is read (as 381).
 The synthetic load test is harsher than a game and proves only the direction. The
 live effect has to be read from the panel: the status line shows frames per second,
 the footer the per-frame reading and capture times.
+
+## Piles of small hits and raw-frame cost (2026-11-14 recording)
+
+The 2026-11-14 recording was read about equally live and in replay (38 hits
+each; roughly 46 numbers are legible in it), while the panel reported 22–32 ms
+of reading time per frame and 27–38 fps with a recorder running. Two findings:
+
+- **Raw captures cost more than video frames.** Replays of recordings took about
+  10 ms per frame, but the raw DXGI frames saved by `capture_probe` took 15.6 ms
+  on an idle machine (p95 23 ms): uncompressed pixels produce more runs and
+  more candidate components. CPU load from the game and recorder roughly doubles
+  that. The digit splitter now derives each candidate box from per-column
+  statistics instead of rescanning and copying the mask, and the labeling loop
+  classifies and cuts runs in two tight passes. The same raw frames now take
+  7.9 ms (p95 10.8 ms). With every core kept busy by a synthetic load they take
+  about 20 ms.
+- **Piles of small hits.** A multi-hit attack can put nine numbers of 22–25 px in
+  one spot (seven 384s and a 351 in the 2026-11-13 recording). Several are hidden
+  under others and cannot be read by anyone. Of the legible ones the reader got
+  one, as "381": readings of a 351 and of a 384 thirty pixels away were voted
+  into one track digit by digit. A track that has read one value three times now
+  refuses a reading that differs by more than one digit and sits off its spot;
+  that reading starts its own track. White text also lost its anti-aliased edge
+  over warm floors because Physical accepted only near-pure white; warm-tinted
+  white up to 16 % saturation is now accepted, which keeps small digits whole.
+  The pile now yields 331 (the 351 with one digit wrong) and 384.
+
+A reading that adds two or more digits to the majority reading must now be seen
+at least as often as that reading. A neighbor's digits glued to the front of a
+number had produced a 902752 from a 2752 next to a 906.
+
+Still open: hits fully covered by others in a pile are not counted, and digits of
+22–25 px score only 0.5–0.8 against the templates, so small numbers are read in
+fewer frames than large ones.
