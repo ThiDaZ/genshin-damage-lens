@@ -35,8 +35,10 @@ impl BoundingBox {
 pub struct DetectedComponent {
     pub bbox: BoundingBox,
     pub element: ElementType,
-    /// Seed hue keeps same-element text separate from differently colored effects.
-    pub hue: u16,
+    /// Segmentation label of the component's pixels (see `label_pixel`). It is
+    /// finer than the element: it keeps text apart from effects of the same
+    /// element, so components with different labels never belong to one number.
+    pub label: u8,
     pub pixel_count: usize,
     pub mask: Vec<u8>, // Local binary bitmap of the component
 }
@@ -157,6 +159,12 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
     None
 }
 
+/// Dendro text is fully saturated green (about RGB 0,202,80). The glow that
+/// Lunar-Bloom, Lauma's field and other Dendro effects lay over the fight is the
+/// same hue but pale (saturation 20-45 %). Anti-aliased text edges fall in
+/// between; 60 % keeps the glyph body and leaves the glow out.
+const DENDRO_TEXT_SATURATION: u8 = 60;
+
 const ELEMENTS: [ElementType; 8] = [
     ElementType::Pyro,
     ElementType::Hydro,
@@ -168,14 +176,39 @@ const ELEMENTS: [ElementType; 8] = [
     ElementType::Physical,
 ];
 
+/// Label of Lunar-Bloom damage text, one past the labels of `ELEMENTS`.
+pub const LUNAR_BLOOM_LABEL: u8 = 1 + ((ELEMENTS.len() as u8) << 1);
+
+/// Lean of Lunar-Bloom digits: pixels to the right per pixel up.
+const LUNAR_SLANT: f32 = 0.27;
+
+/// Lunar-Bloom numbers are not drawn like other damage text. Each digit is a
+/// gradient at full brightness, from pale green at the top (about RGB
+/// 185,253,180: saturation 30 %) to almost white at the bottom (250,253,239:
+/// saturation 5 %), inside a dark green outline, and the digits lean right.
+/// The element classes cut such a digit into Dendro, nothing and Physical, so
+/// the green part of the gradient gets a label of its own. Saturation of 8 %
+/// and less stays Physical: white text over green scenery is tinted that much,
+/// and taking those pixels broke up white numbers. The white end of a digit is
+/// attached again in `lunar_glyph_mask`.
+#[inline(always)]
+fn is_lunar_bloom_text(r: u8, g: u8, b: u8) -> bool {
+    let (h, s, v) = rgb_to_hsv(r, g, b);
+    v >= 88 && (60..=150).contains(&h) && (9..=45).contains(&s)
+}
+
 /// Per-pixel segmentation label: 0 for background, otherwise the element plus
-/// one bit that splits Pyro (orange text vs. red effects) and Electro (purple
-/// text vs. reddish scenery). Two pixels belong together iff labels are equal.
+/// one bit that splits Pyro (orange text vs. red effects), Electro (purple
+/// text vs. reddish scenery) and Dendro (saturated text vs. pale glow), or
+/// `LUNAR_BLOOM_LABEL`. Two pixels belong together iff labels are equal.
 #[inline(always)]
 fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
     // Same cut as `v < 58` in classify_element, without the float work.
     if r.max(g).max(b) <= 147 {
         return 0;
+    }
+    if is_lunar_bloom_text(r, g, b) {
+        return LUNAR_BLOOM_LABEL;
     }
     let Some(element) = classify_element(r, g, b) else {
         return 0;
@@ -183,6 +216,7 @@ fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
     let split = match element {
         ElementType::Pyro => (23..=42).contains(&rgb_to_hsv(r, g, b).0),
         ElementType::Electro => rgb_to_hsv(r, g, b).0 <= 305,
+        ElementType::Dendro => rgb_to_hsv(r, g, b).1 >= DENDRO_TEXT_SATURATION,
         _ => false,
     };
     let index = ELEMENTS.iter().position(|&e| e == element).unwrap_or(0) as u8;
@@ -190,7 +224,103 @@ fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
 }
 
 fn element_of_label(label: u8) -> Option<ElementType> {
+    if label == LUNAR_BLOOM_LABEL {
+        // Lunar-Bloom damage is Dendro damage.
+        return Some(ElementType::Dendro);
+    }
     ELEMENTS.get((label.checked_sub(1)? >> 1) as usize).copied()
+}
+
+/// Cut one Lunar-Bloom glyph out of the frame.
+///
+/// The lower third of a digit fades to white, which is Physical by color, so
+/// the labeled component is only the upper part. Starting from that part,
+/// collect the Lunar-Bloom and white pixels connected to it, inside a window
+/// that reaches below the component by 0.7 of its height (and left by the
+/// lean that goes with it). Connectivity also keeps leaning neighbors, whose boxes
+/// overlap this one, out of the mask. Returns the box origin, size and mask.
+fn lunar_glyph_mask(
+    labels: &[u8],
+    w: usize,
+    h: usize,
+    first: &Run,
+    extent: &Extent,
+) -> (usize, usize, usize, usize, Vec<u8>) {
+    let physical = 1 + ((ELEMENTS.len() as u8 - 1) << 1);
+    debug_assert_eq!(element_of_label(physical), Some(ElementType::Physical));
+    let comp_h = (extent.max_y - extent.min_y + 1) as usize;
+    let below = (comp_h * 7).div_ceil(10);
+    let x0 = (extent.min_x as usize).saturating_sub((LUNAR_SLANT * below as f32) as usize + 3);
+    let x1 = (extent.max_x as usize + 3).min(w - 1);
+    let y0 = extent.min_y as usize;
+    let y1 = (extent.max_y as usize + below).min(h - 1);
+    let (ww, wh) = (x1 - x0 + 1, y1 - y0 + 1);
+
+    let mut seen = vec![0u8; ww * wh];
+    let start = (first.y as usize - y0) * ww + first.x0 as usize - x0;
+    seen[start] = 255;
+    let mut stack = vec![start];
+    let (mut lo_x, mut hi_x, mut hi_y) = (ww, 0, 0);
+    while let Some(p) = stack.pop() {
+        let (x, y) = (p % ww, p / ww);
+        lo_x = lo_x.min(x);
+        hi_x = hi_x.max(x);
+        hi_y = hi_y.max(y);
+        let mut visit = |nx: usize, ny: usize| {
+            let label = labels[(y0 + ny) * w + x0 + nx];
+            let q = ny * ww + nx;
+            if seen[q] == 0 && (label == LUNAR_BLOOM_LABEL || label == physical) {
+                seen[q] = 255;
+                stack.push(q);
+            }
+        };
+        if x > 0 {
+            visit(x - 1, y);
+        }
+        if x + 1 < ww {
+            visit(x + 1, y);
+        }
+        if y > 0 {
+            visit(x, y - 1);
+        }
+        if y + 1 < wh {
+            visit(x, y + 1);
+        }
+    }
+
+    let (out_w, out_h) = (hi_x - lo_x + 1, hi_y + 1);
+    let mut mask = vec![0u8; out_w * out_h];
+    for (y, out) in mask.chunks_exact_mut(out_w).enumerate() {
+        out.copy_from_slice(&seen[y * ww + lo_x..=y * ww + hi_x]);
+    }
+    (x0 + lo_x, y0, out_w, out_h, mask)
+}
+
+/// Straighten a right-leaning glyph mask: every row moves right in proportion
+/// to its distance from the top, then empty columns are cut off. Returns the
+/// mask, its width, and where its left edge lies relative to the old one when
+/// the bottom row stays in place.
+fn deskew(mask: &[u8], w: usize, h: usize, slant: f32) -> (Vec<u8>, usize, i64) {
+    let shift = |y: usize| (slant * y as f32).round() as usize;
+    let wide = w + shift(h - 1);
+    let (mut lo, mut hi) = (wide, 0);
+    for (y, row) in mask.chunks_exact(w).enumerate() {
+        for (x, _) in row.iter().enumerate().filter(|(_, &m)| m > 0) {
+            lo = lo.min(x + shift(y));
+            hi = hi.max(x + shift(y));
+        }
+    }
+    if lo > hi {
+        return (mask.to_vec(), w, 0);
+    }
+    let out_w = hi - lo + 1;
+    let mut out = vec![0u8; out_w * h];
+    for (y, row) in mask.chunks_exact(w).enumerate() {
+        for (x, _) in row.iter().enumerate().filter(|(_, &m)| m > 0) {
+            out[y * out_w + x + shift(y) - lo] = 255;
+        }
+    }
+    (out, out_w, lo as i64 - shift(h - 1) as i64)
 }
 
 /// Threads used to label a frame. Four at most, and never more than half the
@@ -620,20 +750,13 @@ impl ColorFilter {
     ) -> Option<DetectedComponent> {
         let w = frame.width as usize;
         let h = frame.height as usize;
-        let data = &frame.data;
 
         // Damage text can share its element with an enormous attack effect.
-        // The label also separates orange text from red effects within Pyro and
-        // purple text from reddish scenery within Electro.
+        // The label also separates orange text from red effects within Pyro,
+        // purple text from reddish scenery within Electro and saturated text
+        // from pale glow within Dendro.
         let seed = first.label;
         let target_elem = element_of_label(seed)?;
-        let seed_offset = first.y as usize * frame.stride + first.x0 as usize * 4;
-        let seed_hue = rgb_to_hsv(
-            data[seed_offset + 2],
-            data[seed_offset + 1],
-            data[seed_offset],
-        )
-        .0;
 
         // Large background planes and effects are not text.
         // Text grows briefly on impact; area scales in two dimensions.
@@ -697,6 +820,26 @@ impl ColorFilter {
             return None;
         }
 
+        // Lunar-Bloom digits are completed by their white lower part and
+        // straightened: everything downstream expects whole, upright digits.
+        if seed == LUNAR_BLOOM_LABEL {
+            let (x, y, gw, gh, mask) = lunar_glyph_mask(labels, w, h, first, extent);
+            let pixel_count = mask.iter().filter(|&&m| m > 0).count();
+            let (mask, gw, dx) = deskew(&mask, gw, gh, LUNAR_SLANT);
+            return Some(DetectedComponent {
+                bbox: BoundingBox {
+                    x: (x as i64 + dx).max(0) as u32,
+                    y: y as u32,
+                    width: gw as u32,
+                    height: gh as u32,
+                },
+                element: target_elem,
+                label: seed,
+                pixel_count,
+                mask,
+            });
+        }
+
         Some(DetectedComponent {
             bbox: BoundingBox {
                 x: min_x as u32,
@@ -705,7 +848,7 @@ impl ColorFilter {
                 height: comp_h,
             },
             element: target_elem,
-            hue: seed_hue,
+            label: seed,
             pixel_count: count,
             mask,
         })
@@ -890,7 +1033,7 @@ impl ColorFilter {
                         height: tight_h,
                     },
                     element: comp.element,
-                    hue: comp.hue,
+                    label: comp.label,
                     pixel_count: sub_pixels,
                     mask: sub_mask,
                 });
@@ -980,17 +1123,7 @@ impl ColorFilter {
             let mut matched_cluster = None;
             for cluster in raw_clusters.iter_mut() {
                 let last = cluster.last().unwrap();
-                if last.element != c.element {
-                    continue;
-                }
-                if last.element == ElementType::Pyro {
-                    let last_orange = (23..=42).contains(&last.hue);
-                    let current_orange = (23..=42).contains(&c.hue);
-                    if last_orange != current_orange {
-                        continue;
-                    }
-                }
-                if last.element == ElementType::Electro && (last.hue <= 305) != (c.hue <= 305) {
+                if last.label != c.label {
                     continue;
                 }
 
@@ -1112,6 +1245,109 @@ mod tests {
         assert!(!ColorFilter::has_contrasting_stroke(
             &frame, 8, 8, 8, 16, &mask
         ));
+    }
+
+    #[test]
+    fn dendro_text_is_cut_out_of_pale_green_glow() {
+        // Lunar-Bloom covers the fight in a pale green glow that is Dendro by
+        // hue. Saturated text inside it must stay a component of its own.
+        let (w, h) = (640usize, 360usize);
+        let mut frame = RawFrame {
+            width: w as u32,
+            height: h as u32,
+            stride: w * 4,
+            data: vec![0; w * h * 4],
+            screen_x: 0,
+            screen_y: 0,
+        };
+        let mut fill = |x0: usize, y0: usize, bw: usize, bh: usize, rgb: (u8, u8, u8)| {
+            for y in y0..y0 + bh {
+                for x in x0..x0 + bw {
+                    let p = y * w * 4 + x * 4;
+                    frame.data[p..p + 4].copy_from_slice(&[rgb.2, rgb.1, rgb.0, 255]);
+                }
+            }
+        };
+        // Colors measured in Lunar-Bloom footage: glow, then text.
+        assert_eq!(classify_element(150, 214, 184), Some(ElementType::Dendro));
+        assert_eq!(classify_element(0, 202, 80), Some(ElementType::Dendro));
+        fill(200, 120, 240, 120, (150, 214, 184));
+        fill(300, 160, 14, 30, (0, 202, 80));
+        fill(322, 160, 14, 30, (0, 202, 80));
+
+        let text: Vec<_> = ColorFilter::segment_frame(&frame)
+            .into_iter()
+            .filter(|c| c.element == ElementType::Dendro && c.label == label_pixel(0, 202, 80))
+            .map(|c| (c.bbox.x, c.bbox.y, c.bbox.width, c.bbox.height))
+            .collect();
+        assert_eq!(text, [(300, 160, 14, 30), (322, 160, 14, 30)]);
+    }
+
+    #[test]
+    fn lunar_bloom_gradient_gets_its_own_label() {
+        // Top, middle and lower part of a Lunar-Bloom digit as recorded.
+        for (r, g, b) in [(185, 253, 180), (203, 253, 190), (221, 251, 217)] {
+            assert_eq!(label_pixel(r, g, b), LUNAR_BLOOM_LABEL, "{r},{g},{b}");
+        }
+        assert_eq!(
+            element_of_label(LUNAR_BLOOM_LABEL),
+            Some(ElementType::Dendro)
+        );
+        // The white end of the gradient and ordinary text keep their labels.
+        let physical = label_pixel(245, 245, 250);
+        assert_eq!(element_of_label(physical), Some(ElementType::Physical));
+        assert_eq!(label_pixel(250, 253, 239), physical);
+        assert_eq!(label_pixel(249, 255, 240), physical);
+        assert_ne!(label_pixel(0, 202, 80), LUNAR_BLOOM_LABEL);
+        // Glow is too dim to be mistaken for the text.
+        assert_ne!(label_pixel(150, 214, 184), LUNAR_BLOOM_LABEL);
+    }
+
+    #[test]
+    fn lunar_bloom_digit_is_completed_and_straightened() {
+        // A leaning bar, 8 px wide and 40 px tall: green for the upper 28
+        // rows, white below, on a dark background.
+        let (w, h) = (640usize, 360usize);
+        let mut frame = RawFrame {
+            width: w as u32,
+            height: h as u32,
+            stride: w * 4,
+            data: vec![0; w * h * 4],
+            screen_x: 0,
+            screen_y: 0,
+        };
+        let draw = |frame: &mut RawFrame, left: usize, top: usize| {
+            for y in 0..40usize {
+                let x0 = left + (LUNAR_SLANT * (39 - y) as f32).round() as usize;
+                let rgb: [u8; 3] = if y < 28 {
+                    [185, 253, 180]
+                } else {
+                    [255, 255, 255]
+                };
+                for x in x0..x0 + 8 {
+                    let p = (top + y) * w * 4 + x * 4;
+                    frame.data[p..p + 4].copy_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+                }
+            }
+        };
+        // Close enough that the leaning boxes overlap.
+        draw(&mut frame, 300, 160);
+        draw(&mut frame, 312, 160);
+
+        let glyphs: Vec<_> = ColorFilter::segment_frame(&frame)
+            .into_iter()
+            .filter(|c| c.label == LUNAR_BLOOM_LABEL)
+            .collect();
+        assert_eq!(glyphs.len(), 2, "the bars stay separate");
+        for (glyph, left) in glyphs.iter().zip([300u32, 312]) {
+            // Whole height including the white end, and upright: about as
+            // wide as the bar itself instead of bar plus lean (18 px). Row
+            // shifts are rounded, which may cost one pixel.
+            assert_eq!((glyph.bbox.y, glyph.bbox.height), (160, 40));
+            assert!((8..=9).contains(&glyph.bbox.width), "{:?}", glyph.bbox);
+            assert!(glyph.bbox.x.abs_diff(left) <= 1, "{:?}", glyph.bbox);
+            assert_eq!(glyph.pixel_count, 8 * 40);
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use genshin_damage_lens_lib::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args()
         .nth(1)
-        .ok_or("Usage: inspect_frame <png>")?;
+        .ok_or("Usage: inspect_frame <png> [--masks]")?;
     let image = image::open(path)?.to_rgba8();
     let (width, height) = image.dimensions();
     let mut data = image.into_raw();
@@ -58,6 +58,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
                 sample
             );
+            // `--masks` draws each glyph as the matcher sees it.
+            if std::env::args().any(|a| a == "--masks") {
+                for row in g.mask.chunks_exact(g.bbox.width as usize) {
+                    let line: String = row.iter().map(|&m| if m > 0 { '#' } else { '.' }).collect();
+                    println!("    {line}");
+                }
+            }
         }
     }
     Ok(())
