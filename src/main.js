@@ -159,11 +159,14 @@ function renderStatus(status) {
 function renderDiagnostics(d) {
   if (d.status !== "tracking") return;
   $("status-text").textContent = `Tracking · ${Math.round(d.fps)} fps`;
+  const capture = Number.isFinite(d.capture_ms) ? d.capture_ms : 0;
   $("capture-details").textContent =
-    `${d.width}×${d.height} · ${d.processing_ms.toFixed(1)} ms per frame · ` +
-    `${d.hits} hits / ${d.candidates} readings`;
+    `${d.width}×${d.height} · read ${d.processing_ms.toFixed(1)} ms · ` +
+    `capture ${capture.toFixed(1)} ms · ${d.hits} hits`;
   $("capture-details").title =
-    "Readings are single-frame number sightings. A hit is one number confirmed across frames.";
+    `Per frame: ${d.processing_ms.toFixed(1)} ms reading numbers, ${capture.toFixed(1)} ms ` +
+    `copying the screen. ${d.candidates} single-frame readings became ${d.hits} confirmed ` +
+    "hits in the last two seconds. Frame rate is in the status line above.";
 }
 
 function renderPassthrough(on) {
