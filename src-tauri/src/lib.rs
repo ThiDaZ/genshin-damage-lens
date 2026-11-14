@@ -114,6 +114,12 @@ fn mask_panel(frame: &mut capture::RawFrame, origin: (i32, i32), rect: (i32, i32
     }
 }
 
+/// Close button on the overlay: the window has no taskbar entry to close from.
+#[tauri::command]
+fn quit_app(app_handle: AppHandle) {
+    app_handle.exit(0);
+}
+
 #[tauri::command]
 fn set_capture_active(enabled: bool, state: State<'_, SharedState>) -> bool {
     state.lock().set_capture_active(enabled);
@@ -260,6 +266,7 @@ pub fn run() {
             set_capture_active,
             set_show_in_recordings,
             set_panel_rect,
+            quit_app,
             simulate_hit,
         ])
         .setup(move |app| {
