@@ -1,5 +1,5 @@
 use super::window_finder::{WindowFinder, WindowRect};
-use super::{clip_to_output, CaptureOutcome, RawFrame};
+use super::{clip_to_output, CaptureOutcome, FrameCrop, RawFrame};
 use windows::core::{Interface, Result};
 use windows::Win32::Foundation::{E_FAIL, HMODULE};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
@@ -18,7 +18,15 @@ pub struct DxgiCapture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
-    staging_texture: Option<ID3D11Texture2D>,
+    /// Two CPU-readable copies, used in turn. See `capture_region`.
+    staging: [Option<ID3D11Texture2D>; 2],
+    /// The staging texture written by the previous call, not yet read back.
+    pending: Option<(usize, FrameCrop)>,
+    next: usize,
+    /// A pixel buffer handed back by the caller, reused for the next frame.
+    spare: Option<Vec<u8>>,
+    /// Time spent copying and reading back the last delivered frame.
+    last_copy: std::time::Duration,
     width: u32,
     height: u32,
     output_rect: WindowRect,
@@ -51,7 +59,11 @@ impl DxgiCapture {
             device,
             context,
             duplication,
-            staging_texture: None,
+            staging: [None, None],
+            pending: None,
+            next: 0,
+            spare: None,
+            last_copy: std::time::Duration::ZERO,
             width,
             height,
             output_rect: WindowRect {
@@ -126,7 +138,8 @@ impl DxgiCapture {
     }
 
     fn ensure_staging_texture(&mut self, width: u32, height: u32) -> Result<()> {
-        if self.staging_texture.is_some() && self.width == width && self.height == height {
+        if self.staging.iter().all(Option::is_some) && self.width == width && self.height == height
+        {
             return Ok(());
         }
 
@@ -146,22 +159,55 @@ impl DxgiCapture {
             MiscFlags: 0,
         };
 
-        let mut tex = None;
-        unsafe {
-            self.device.CreateTexture2D(&desc, None, Some(&mut tex))?;
+        self.pending = None;
+        for slot in &mut self.staging {
+            let mut tex = None;
+            unsafe {
+                self.device.CreateTexture2D(&desc, None, Some(&mut tex))?;
+            }
+            *slot = tex;
         }
-        self.staging_texture = tex;
         self.width = width;
         self.height = height;
         Ok(())
     }
 
+    /// The desktop rectangle of the display being captured.
+    pub fn output_rect(&self) -> WindowRect {
+        self.output_rect
+    }
+
+    /// Give a delivered frame's pixel buffer back for reuse. Allocating eight
+    /// megabytes per frame costs a page fault for every page, every frame.
+    pub fn recycle(&mut self, data: Vec<u8>) {
+        self.spare = Some(data);
+    }
+
+    /// Copy and read-back time of the most recently delivered frame.
+    pub fn last_copy(&self) -> std::time::Duration {
+        self.last_copy
+    }
+
     pub fn capture_frame(&mut self) -> Result<CaptureOutcome> {
         // Check game availability independently of whether the desktop changed.
-        let crop = match WindowFinder::find_genshin().and_then(WindowFinder::get_client_rect) {
-            Some(rect) => rect,
-            None => return Ok(CaptureOutcome::Unavailable),
-        };
+        match WindowFinder::find_genshin().and_then(WindowFinder::get_client_rect) {
+            Some(rect) => self.capture_region(rect),
+            None => {
+                self.pending = None;
+                Ok(CaptureOutcome::Unavailable)
+            }
+        }
+    }
+
+    /// Capture the part of the display covered by `crop` (desktop coordinates).
+    ///
+    /// Reading a texture back right after copying it makes the CPU wait until
+    /// the GPU has executed the copy. With a game keeping the GPU busy that
+    /// wait is most of a frame. So each call copies the new desktop image into
+    /// one staging texture and reads back the other, which was copied a call
+    /// earlier and is finished by now. Frames arrive one call late and nothing
+    /// waits. The first call after a start or a pause therefore yields no frame.
+    pub fn capture_region(&mut self, crop: WindowRect) -> Result<CaptureOutcome> {
         let cx = i64::from(crop.x) + i64::from(crop.width) / 2;
         let cy = i64::from(crop.y) + i64::from(crop.height) / 2;
         if cx < i64::from(self.output_rect.x)
@@ -176,7 +222,10 @@ impl DxgiCapture {
         }
         let crop = match clip_to_output(crop, self.output_rect) {
             Some(crop) => crop,
-            None => return Ok(CaptureOutcome::Unavailable),
+            None => {
+                self.pending = None;
+                return Ok(CaptureOutcome::Unavailable);
+            }
         };
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
@@ -188,16 +237,18 @@ impl DxgiCapture {
 
         if let Err(e) = hr {
             if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
-                return Ok(CaptureOutcome::NoNewFrame);
+                // The desktop is still; hand out the copy that is waiting.
+                return self.read_pending();
             }
             return Err(e);
         }
+        let started = std::time::Instant::now();
 
         let resource = match resource {
             Some(r) => r,
             None => {
                 let _ = unsafe { self.duplication.ReleaseFrame() };
-                return Ok(CaptureOutcome::NoNewFrame);
+                return self.read_pending();
             }
         };
 
@@ -217,22 +268,48 @@ impl DxgiCapture {
             let _ = unsafe { self.duplication.ReleaseFrame() };
             return Err(windows::core::Error::new(E_FAIL, "Capture output resized"));
         }
-        let staging = match &self.staging_texture {
-            Some(s) => s.clone(),
-            None => {
-                let _ = unsafe { self.duplication.ReleaseFrame() };
-                return Ok(CaptureOutcome::Unavailable);
-            }
+        let Some(staging) = self.staging[self.next].clone() else {
+            let _ = unsafe { self.duplication.ReleaseFrame() };
+            return Ok(CaptureOutcome::Unavailable);
         };
 
-        // Copy desktop resource to CPU-readable staging texture
+        // Queue the copy and submit it; do not wait for it.
         unsafe {
             self.context.CopyResource(&staging, &desktop_texture);
+            self.context.Flush();
         }
-
         let _ = unsafe { self.duplication.ReleaseFrame() };
 
-        // Map staging buffer to read pixels
+        let ready = self.pending.replace((self.next, crop));
+        self.next ^= 1;
+        let outcome = match ready {
+            Some((index, crop)) => self.read_back(index, &crop)?,
+            None => CaptureOutcome::NoNewFrame,
+        };
+        self.last_copy = started.elapsed();
+        Ok(outcome)
+    }
+
+    fn read_pending(&mut self) -> Result<CaptureOutcome> {
+        match self.pending.take() {
+            Some((index, crop)) => {
+                let started = std::time::Instant::now();
+                let outcome = self.read_back(index, &crop)?;
+                self.last_copy = started.elapsed();
+                Ok(outcome)
+            }
+            None => Ok(CaptureOutcome::NoNewFrame),
+        }
+    }
+
+    /// Map a finished staging copy and take the crop out of it.
+    fn read_back(&mut self, index: usize, crop: &FrameCrop) -> Result<CaptureOutcome> {
+        let Some(staging) = self.staging[index].clone() else {
+            return Ok(CaptureOutcome::Unavailable);
+        };
+        if crop.width < 640 || crop.height < 480 {
+            return Ok(CaptureOutcome::Unavailable);
+        }
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
             self.context
@@ -241,42 +318,30 @@ impl DxgiCapture {
 
         let p_data = mapped.pData as *const u8;
         let row_pitch = mapped.RowPitch as usize;
+        let row_len = crop.width as usize * 4;
+        let len = row_len * crop.height as usize;
 
-        let cx0 = crop.local_x;
-        let cy0 = crop.local_y;
-        let crop_w = crop.width;
-        let crop_h = crop.height;
-
-        let frame = if crop_w >= 640 && crop_h >= 480 {
-            let mut data = vec![0u8; (crop_w * crop_h * 4) as usize];
-            for row in 0..crop_h {
-                let src_offset = ((cy0 + row) as usize * row_pitch) + (cx0 as usize * 4);
-                let dst_offset = (row * crop_w * 4) as usize;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        p_data.add(src_offset),
-                        data.as_mut_ptr().add(dst_offset),
-                        (crop_w * 4) as usize,
-                    );
-                }
+        // Every byte is overwritten below, so a reused buffer needs no clearing.
+        let mut data = self.spare.take().unwrap_or_default();
+        data.resize(len, 0);
+        for (row, out) in data.chunks_exact_mut(row_len).enumerate() {
+            let src_offset = (crop.local_y as usize + row) * row_pitch + crop.local_x as usize * 4;
+            unsafe {
+                std::ptr::copy_nonoverlapping(p_data.add(src_offset), out.as_mut_ptr(), row_len);
             }
-
-            CaptureOutcome::Frame(RawFrame {
-                width: crop_w,
-                height: crop_h,
-                stride: (crop_w * 4) as usize,
-                data,
-                screen_x: crop.screen_x,
-                screen_y: crop.screen_y,
-            })
-        } else {
-            CaptureOutcome::Unavailable
-        };
+        }
 
         unsafe {
             self.context.Unmap(&staging, 0);
         }
 
-        Ok(frame)
+        Ok(CaptureOutcome::Frame(RawFrame {
+            width: crop.width,
+            height: crop.height,
+            stride: row_len,
+            data,
+            screen_x: crop.screen_x,
+            screen_y: crop.screen_y,
+        }))
     }
 }
