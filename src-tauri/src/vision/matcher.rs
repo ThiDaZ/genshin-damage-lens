@@ -597,14 +597,7 @@ impl DigitMatcher {
             let mut recovered = None;
             for j in i + 1..comps.len() {
                 let b = &comps[j];
-                if used[j] || a.element != b.element {
-                    continue;
-                }
-                if (a.element == crate::state::ElementType::Pyro
-                    && (23..=42).contains(&a.hue) != (23..=42).contains(&b.hue))
-                    || (a.element == crate::state::ElementType::Electro
-                        && (a.hue <= 305) != (b.hue <= 305))
-                {
+                if used[j] || a.label != b.label {
                     continue;
                 }
                 let bbox = a.bbox.merge(&b.bbox);
@@ -645,7 +638,7 @@ impl DigitMatcher {
                 recovered = Some(DetectedComponent {
                     bbox,
                     element: a.element,
-                    hue: a.hue,
+                    label: a.label,
                     pixel_count: a.pixel_count + b.pixel_count,
                     mask,
                 });
@@ -765,7 +758,7 @@ impl DigitMatcher {
                         height: ch as u32,
                     },
                     element: comp.element,
-                    hue: comp.hue,
+                    label: comp.label,
                     pixel_count: mask.iter().filter(|&&p| p > 0).count(),
                     mask,
                 }
@@ -794,7 +787,7 @@ impl DigitMatcher {
                     let mut merged = DetectedComponent {
                         bbox,
                         element: a.element,
-                        hue: a.hue,
+                        label: a.label,
                         pixel_count: 0,
                         mask: vec![0; (bbox.width * bbox.height) as usize],
                     };
@@ -1123,7 +1116,7 @@ mod tests {
                 height: 24,
             },
             element: ElementType::Pyro,
-            hue: 35,
+            label: 1,
             pixel_count: mask.iter().filter(|&&p| p > 0).count(),
             mask,
         }
