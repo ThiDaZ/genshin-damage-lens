@@ -30,9 +30,6 @@
               />
             </svg>
           </button>
-          <button class="icon-btn" id="btn-compact" title="Compact view" aria-label="Compact view">
-            <svg viewBox="0 0 16 16"><path d="M3 5.5h10v1.5H3zM3 9h10v1.5H3z" /></svg>
-          </button>
           <button class="icon-btn" id="btn-more" title="More" aria-label="More" aria-expanded="false">
             <svg viewBox="0 0 16 16">
               <circle cx="3.5" cy="8" r="1.4" />
@@ -46,11 +43,16 @@
             </svg>
             <span>F8</span>
           </button>
+          <span class="bar-divider" aria-hidden="true"></span>
+          <button class="icon-btn close-btn" id="btn-close" title="Quit Damage Lens" aria-label="Quit Damage Lens">
+            <svg viewBox="0 0 16 16"><path d="M4.2 3.1 8 6.9l3.8-3.8 1.1 1.1L9.1 8l3.8 3.8-1.1 1.1L8 9.1l-3.8 3.8-1.1-1.1L6.9 8 3.1 4.2z" /></svg>
+          </button>
         </div>
 
         <div class="menu" id="menu" hidden>
-          <button class="menu-item" id="btn-simulate">Add a test hit</button>
-          <button class="menu-item" id="btn-auto-sim">Run demo combat</button>
+          <button class="menu-item" id="btn-compact" title="Hide the details and show only the summary">
+            Compact view
+          </button>
           <button class="menu-item" id="btn-recordings" title="Lets OBS or Streamlabs capture the panel">
             Show in recordings
           </button>
