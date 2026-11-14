@@ -1,7 +1,7 @@
 //! Replay a recording through the live pipeline and report hits and timing.
 //!
 //! ffmpeg -v error -i clip.mp4 -f rawvideo -pix_fmt bgra - |
-//!     cargo run --release --example video_bench -- 1920 1080 60 [--realtime] [--detections] [--trace]
+//!     cargo run --release --example video_bench -- 1920 1080 60 [--realtime] [--detections] [--trace] [--mask x,y,w,h]
 //!
 //! Default mode processes every frame with recording timestamps (best case).
 //! `--realtime` drops the frames that would have gone by while the previous one
@@ -31,7 +31,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
         eprintln!(
-            "Usage: video_bench <width> <height> <fps> [--realtime] [--detections] [--trace]"
+            "Usage: video_bench <width> <height> <fps> [--realtime] [--detections] [--trace] [--mask x,y,w,h]"
         );
         std::process::exit(2);
     }
@@ -40,7 +40,17 @@ fn main() {
     let fps: f64 = args[2].parse().expect("fps");
     let realtime = args.iter().any(|a| a == "--realtime");
     let show_detections = args.iter().any(|a| a == "--detections");
+    // --mask x,y,w,h blanks a box, e.g. the overlay panel in a recording of it.
+    let mask: Option<Vec<usize>> = args
+        .iter()
+        .position(|a| a == "--mask")
+        .and_then(|i| args.get(i + 1))
+        .map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect())
+        .filter(|v: &Vec<usize>| v.len() == 4);
 
+    if std::env::var_os("GDL_NO_PRIORITY").is_none() {
+        genshin_damage_lens_lib::vision::prefer_this_process();
+    }
     let frame_len = width as usize * height as usize * 4;
     let mut stdin = std::io::stdin().lock();
     let mut engine = VisionEngine::new();
@@ -63,6 +73,13 @@ fn main() {
         index += 1;
         if realtime && t_ms < busy_until_ms {
             continue;
+        }
+        if let Some(m) = &mask {
+            let (x0, x1) = (m[0].min(width as usize), (m[0] + m[2]).min(width as usize));
+            for y in m[1].min(height as usize)..(m[1] + m[3]).min(height as usize) {
+                let row = y * width as usize * 4;
+                data[row + x0 * 4..row + x1 * 4].fill(0);
+            }
         }
         let frame = RawFrame {
             width,
