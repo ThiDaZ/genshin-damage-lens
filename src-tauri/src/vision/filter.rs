@@ -179,6 +179,19 @@ const ELEMENTS: [ElementType; 8] = [
 /// Label of Lunar-Bloom damage text, one past the labels of `ELEMENTS`.
 pub const LUNAR_BLOOM_LABEL: u8 = 1 + ((ELEMENTS.len() as u8) << 1);
 
+/// Tallest glyph accepted, in pixels at 720p. A number pops in several times
+/// its final size and shrinks within a few frames. For most text the frames
+/// after that are enough. Lunar-Bloom hits land as two or three equal numbers
+/// on one spot, where each is whole only while it is still enlarged on top of
+/// the others, so those are read at up to about 3.5 times their final size.
+fn max_glyph_height(label: u8) -> f32 {
+    if label == LUNAR_BLOOM_LABEL {
+        150.0
+    } else {
+        110.0
+    }
+}
+
 /// Lean of Lunar-Bloom digits: pixels to the right per pixel up.
 const LUNAR_SLANT: f32 = 0.27;
 
@@ -202,7 +215,7 @@ fn is_lunar_bloom_text(r: u8, g: u8, b: u8) -> bool {
 /// text vs. reddish scenery) and Dendro (saturated text vs. pale glow), or
 /// `LUNAR_BLOOM_LABEL`. Two pixels belong together iff labels are equal.
 #[inline(always)]
-fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
+pub fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
     // Same cut as `v < 58` in classify_element, without the float work.
     if r.max(g).max(b) <= 147 {
         return 0;
@@ -777,7 +790,7 @@ impl ColorFilter {
 
         // Height filter scaled by viewport resolution: supports 720p through 4K
         let min_glyph_h = (12.0 * scale) as u32;
-        let max_glyph_h = (110.0 * scale) as u32;
+        let max_glyph_h = (max_glyph_height(seed) * scale) as u32;
         if comp_h < min_glyph_h || comp_h > max_glyph_h {
             return None;
         }
@@ -1049,6 +1062,76 @@ impl ColorFilter {
         }
     }
 
+    /// Two numbers that end up side by side form one row of glyphs: a 25286
+    /// next to a 95922 was one ten-digit cluster, a 9942 whose neighbor
+    /// covered the gap a seven-digit one. The digits of one number share a
+    /// top line and a baseline, and a second number rarely sits at the same
+    /// height and size. Cut the row where the glyphs on both sides agree
+    /// among themselves and the two sides differ by a clear step. Each side
+    /// keeps at least two glyphs; the caller accepts the cut only if both
+    /// sides read as numbers, so a damaged glyph never shortens a number.
+    pub fn split_row_at_step(
+        cluster: &DamageCluster,
+        scale: f32,
+    ) -> Option<(DamageCluster, DamageCluster)> {
+        let glyphs = &cluster.glyphs;
+        if glyphs.len() < 4 {
+            return None;
+        }
+        let top = |g: &DetectedComponent| g.bbox.y as i32;
+        let bottom = |g: &DetectedComponent| (g.bbox.y + g.bbox.height) as i32;
+        // (smallest, largest, median) of one edge over a run of glyphs.
+        let spread = |part: &[DetectedComponent], edge: &dyn Fn(&DetectedComponent) -> i32| {
+            let mut values: Vec<i32> = part.iter().map(edge).collect();
+            values.sort_unstable();
+            (
+                values[0],
+                values[values.len() - 1],
+                values[values.len() / 2],
+            )
+        };
+        let mut best: Option<(i32, usize)> = None;
+        for cut in 2..=glyphs.len() - 2 {
+            let (left, right) = glyphs.split_at(cut);
+            let height = left
+                .iter()
+                .chain(right)
+                .map(|g| g.bbox.height)
+                .max()
+                .unwrap_or(0) as f32;
+            let needed = (height * 0.12).max(3.0 * scale);
+            for edge in [&top as &dyn Fn(&DetectedComponent) -> i32, &bottom] {
+                let (l_min, l_max, l_mid) = spread(left, edge);
+                let (r_min, r_max, r_mid) = spread(right, edge);
+                let step = (l_mid - r_mid).abs();
+                // The sides must not reach into each other's range either.
+                let apart = (r_min - l_max).max(l_min - r_max);
+                if step as f32 >= needed
+                    && ((l_max - l_min).max(r_max - r_min) as f32) <= step as f32 * 0.4
+                    && apart as f32 >= step as f32 * 0.5
+                    && best.is_none_or(|(s, _)| step > s)
+                {
+                    best = Some((step, cut));
+                }
+            }
+        }
+        let (_, cut) = best?;
+        let part = |glyphs: &[DetectedComponent]| {
+            let bbox = glyphs
+                .iter()
+                .skip(1)
+                .fold(glyphs[0].bbox, |b, g| b.merge(&g.bbox));
+            let crit_height = (27.0 * scale) as u32;
+            DamageCluster {
+                element: cluster.element,
+                bbox,
+                is_crit: glyphs.iter().any(|g| g.bbox.height >= crit_height),
+                glyphs: glyphs.to_vec(),
+            }
+        };
+        Some((part(&glyphs[..cut]), part(&glyphs[cut..])))
+    }
+
     /// Check if a component is an exclamation mark '!' (narrow and has vertical gap before dot)
     pub fn is_exclamation_glyph(c: &DetectedComponent) -> bool {
         let gw = c.bbox.width as usize;
@@ -1096,9 +1179,9 @@ impl ColorFilter {
             for s in split {
                 let aspect = s.bbox.width as f32 / s.bbox.height as f32;
                 let min_h = (12.0 * scale) as u32;
-                let max_h = (110.0 * scale) as u32;
+                let max_h = (max_glyph_height(s.label) * scale) as u32;
                 let min_w = (4.0 * scale) as u32;
-                let max_w = (100.0 * scale) as u32;
+                let max_w = (max_glyph_height(s.label) * 0.91 * scale) as u32;
                 let min_px = (8.0 * scale) as usize;
 
                 if s.bbox.height >= min_h
