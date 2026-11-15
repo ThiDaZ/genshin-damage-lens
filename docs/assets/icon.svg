@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="GenshinDamageLens icon">
+  <!-- Tile: flat cream -->
+  <rect width="512" height="512" rx="112" fill="#f3efe6"/>
+
+  <!-- Lens ring, open at the lower right like the logo's crescent -->
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#171b25" stroke-opacity="0.16"
+          stroke-width="8" stroke-linecap="round" stroke-dasharray="640 302.5"
+          transform="rotate(110 256 256)"/>
+
+  <!-- Capture brackets -->
+  <g fill="none" stroke="#171b25" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M112 180V136a24 24 0 0 1 24-24h44"/>
+    <path d="M332 112h44a24 24 0 0 1 24 24v44"/>
+    <path d="M400 332v44a24 24 0 0 1-24 24h-44"/>
+    <path d="M180 400h-44a24 24 0 0 1-24-24v-44"/>
+  </g>
+
+  <!-- Hit: scan line and four-point sparkle in pyro orange -->
+  <rect x="76" y="253" width="360" height="6" rx="3" fill="#e8662a" fill-opacity="0.45"/>
+  <path fill="#e8662a"
+        d="M256 132c8 84 40 116 124 124-84 8-116 40-124 124-8-84-40-116-124-124 84-8 116-40 124-124z"/>
+
+  <!-- Small secondary sparkle -->
+  <path fill="#e8662a"
+        d="M346 152c2 16 8 22 24 24-16 2-22 8-24 24-2-16-8-22-24-24 16-2 22-8 24-24z"/>
+</svg>
