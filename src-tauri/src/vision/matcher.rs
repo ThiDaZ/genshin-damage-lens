@@ -889,6 +889,28 @@ impl DigitMatcher {
         vec![(mask.to_vec(), w, h)]
     }
 
+    /// Read a row of glyphs as one number, or as two when it has a step in
+    /// height or baseline and both sides read as numbers on their own (see
+    /// `ColorFilter::split_row_at_step`). Returns each number with its box.
+    pub fn recognize_row(
+        &self,
+        cluster: &DamageCluster,
+        scale: f32,
+    ) -> Vec<(RecognizedHit, super::filter::BoundingBox)> {
+        if let Some((left, right)) = super::filter::ColorFilter::split_row_at_step(cluster, scale) {
+            if let (Some(a), Some(b)) = (
+                self.recognize_cluster(&left, scale),
+                self.recognize_cluster(&right, scale),
+            ) {
+                return vec![(a, left.bbox), (b, right.bbox)];
+            }
+        }
+        self.recognize_cluster(cluster, scale)
+            .map(|hit| (hit, cluster.bbox))
+            .into_iter()
+            .collect()
+    }
+
     /// Recognize an assembled horizontal damage cluster into a damage number
     pub fn recognize_cluster(&self, cluster: &DamageCluster, scale: f32) -> Option<RecognizedHit> {
         let merged = DamageCluster {
@@ -1146,6 +1168,83 @@ mod tests {
             is_crit: true,
         };
         assert!(matcher.recognize_cluster(&cluster, 1.0).is_none());
+    }
+
+    /// A row of template digits, each 16 px wide with a 4 px gap, starting
+    /// at `x` with its top at `y` and scaled to `height`.
+    fn row(digits: &[usize], x: u32, y: u32, height: u32) -> Vec<DetectedComponent> {
+        digits
+            .iter()
+            .enumerate()
+            .map(|(i, &digit)| {
+                let mut g = glyph(digit, x + i as u32 * 20);
+                g.bbox.y = y;
+                if height != 24 {
+                    // Nearest-neighbor resize of the template rows.
+                    let rows: Vec<&[u8]> = g.mask.chunks(16).collect();
+                    let mask: Vec<u8> = (0..height as usize)
+                        .flat_map(|r| rows[r * 24 / height as usize].iter().copied())
+                        .collect();
+                    g.mask = mask;
+                    g.bbox.height = height;
+                }
+                g
+            })
+            .collect()
+    }
+
+    fn cluster_of(glyphs: Vec<DetectedComponent>) -> DamageCluster {
+        let bbox = glyphs.iter().fold(glyphs[0].bbox, |b, g| b.merge(&g.bbox));
+        DamageCluster {
+            element: ElementType::Pyro,
+            bbox,
+            glyphs,
+            is_crit: false,
+        }
+    }
+
+    #[test]
+    fn row_of_two_numbers_is_read_as_two() {
+        // Measured: a 9942 at 40 px with the 216 of a smaller number (35 px,
+        // 7 px lower) directly behind it was read as 9942216.
+        let matcher = DigitMatcher::new();
+        let mut glyphs = row(&[9, 9, 4, 2], 100, 100, 28);
+        glyphs.extend(row(&[2, 5, 6], 180, 104, 24));
+        let read: Vec<u32> = matcher
+            .recognize_row(&cluster_of(glyphs), 1.0)
+            .iter()
+            .map(|(hit, _)| hit.value)
+            .collect();
+        assert_eq!(read, [9942, 256]);
+    }
+
+    #[test]
+    fn row_without_a_step_or_with_one_odd_glyph_stays_one_number() {
+        let matcher = DigitMatcher::new();
+        let values = |glyphs: Vec<DetectedComponent>| -> Vec<u32> {
+            matcher
+                .recognize_row(&cluster_of(glyphs), 1.0)
+                .iter()
+                .map(|(hit, _)| hit.value)
+                .collect()
+        };
+        assert_eq!(values(row(&[9, 9, 4, 2, 2, 5, 6], 100, 100, 24)), [9942256]);
+        // One glyph standing lower is damage, not a second number: cutting
+        // there would shorten the number.
+        let mut glyphs = row(&[2, 5, 2, 8], 100, 100, 24);
+        glyphs.extend(row(&[6], 180, 105, 24));
+        assert!(
+            crate::vision::filter::ColorFilter::split_row_at_step(&cluster_of(glyphs), 1.0)
+                .is_none()
+        );
+        // A step with an unreadable side is not accepted either.
+        let mut glyphs = row(&[9, 9, 4, 2], 100, 100, 28);
+        let mut junk = row(&[2, 5, 6], 180, 104, 24);
+        for g in &mut junk {
+            g.mask.fill(0);
+        }
+        glyphs.extend(junk);
+        assert!(values(glyphs).is_empty());
     }
 
     #[test]

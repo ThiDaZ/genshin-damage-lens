@@ -258,3 +258,143 @@ and Lunar-Crystallize were not examined. Live capture was not retested.
 
 Still open, and older than this change: the green enemy label "Lv. 100" is read
 as a Dendro 100, and green healing numbers ("+1543") are counted as Dendro damage.
+
+## Stacked equal hits in a pale arena (2026-11-14, second recording)
+
+`2026-11-14 21-36-37.mp4` is a Nefer fight in an arena with pale green walls.
+Counting by eye from contact sheets (approximate, not a labeled set), about 33
+numbers are legible. The recognizer counted 25, two of them wrong values (a
+"109" from a 4409 that was half covered while popping in, a "994" from a 9942
+whose last digit was under the next number).
+
+What goes wrong, in order of effect:
+
+- **Equal numbers on top of each other.** Nefer's hits land as two or three
+  equal numbers within a quarter of a second. Each one pops in several times
+  its final size over the others, and some settle one digit apart: two 95922
+  read as "959222" to the eye and as fragments ("922", "95") to the reader.
+  Three 29274 gave two hits: the third popped in over the fading first, then
+  settled where bright wall ornaments cross it, and was only ever read as
+  "2927", "274" and "20274". Nothing here separates touching glyphs of two
+  numbers; clusters assume one number per row of glyphs.
+- **Wall ornaments in Lunar-Bloom colors.** The walls carry bright lines two to
+  four pixels wide in the same pale green as the top of a Lunar-Bloom digit
+  (the wall has 33-42 % saturation, the text 28-36 % in recorded video). Where
+  a number drifts across them its digits are chained to the lines. Three ways
+  of cutting them off were tried and reverted, because each lost hits in
+  `2026-11-14 20-39-26.mp4` (65 before): a saturation limit of 32 % (50 hits), a
+  text core of at most 32 % with a limited rim of the rest (57), and treating
+  runs shorter than three or four pixels as rim only (58, 57). Small
+  Lunar-Bloom numbers have strokes as thin as the lines.
+- **A steady number covered early.** A 7715 was read five times in a row and
+  dropped: it had floated four pixels, under the 4.5 px that mark a track as
+  moving at 1080p, when the next hit covered it. A track seen for at most half
+  a second now also counts when all of its steps went one way and add up to
+  two pixels per scale unit, with four agreeing readings of a value of at
+  least 100. Text whose box jitters back and forth still does not count. This
+  recovers that hit; the other twelve recordings are unchanged.
+
+The result is 26 hits, 24 of them right. The stacked numbers need a reader
+that can take apart overlapping glyphs, which is the recognizer decision
+described above rather than another threshold.
+
+## Equal numbers on one spot (2026-11-15)
+
+Frame-by-frame inspection of `2026-11-14 21-36-37.mp4` showed how stacked hits
+look to the reader. `label_dump <png> <x,y,w,h> <out.png> [zoom]` draws the
+segmentation labels of a region and lists its components and clusters; it was
+written for this.
+
+- **The newest number is drawn on top, enlarged.** A number pops in at three to
+  four times its final size (a 29274 measured 168 px, then 118 px, against
+  45-47 px settled at 1080p) and is whole and unobstructed for two to five
+  frames. After that it sits on or under its equals. Those frames were lost:
+  168 px is above the 165 px glyph limit, and the tracker took an equal value
+  on the same spot for the old number.
+- **A returning number was assumed too often.** A value counted within the
+  last 1.6 s and then out of view was dropped as "the same number coming back".
+  Attacks that repeat a value every second (a 4409 in this recording, 1159,
+  646, 5165 in the element recordings) lost every second hit that way.
+- **Two numbers side by side form one row of glyphs.** A 25286 next to a 95922
+  was one ten-digit cluster and rejected. A 9942 with the "216" of a number
+  behind it was read as 9942216.
+
+What changed:
+
+- Lunar-Bloom glyphs are accepted up to 150 px at 720p (225 px at 1080p)
+  instead of 110. Other text keeps 110.
+- A reading 1.5 times taller than the tallest of a track's last three readings
+  is not that track's number: numbers only shrink. It starts its own track. If
+  it lies across a track that has established the same value, it counts as a
+  hit when seen in two frames, whole in at least one; a partial reading at
+  about its size ("29" at 118 px after "29274" at 168 px) is the second
+  sighting. Such a track accepts no other value: a 1210661 popping in next to
+  it had been paired with it. Three heights are compared because Lunar-Bloom
+  digits lose their white lower end in single frames.
+- A confirmed number is no longer a repeat of an earlier equal one when it was
+  first read at 1.5 times the size the earlier one was last read at.
+- A row of at least four glyphs is cut where the glyphs on each side share a
+  top line or baseline and the two sides differ by 12 % of the glyph height
+  (at least 3 px at 720p). Each side keeps two glyphs or more, and the cut is
+  used only when both sides read as numbers. Cutting off a single odd glyph
+  would shorten a number whose last digit is damaged.
+
+Measured, the binary before these changes against the one after, all frames
+with recording timestamps. Every added hit was looked up in the frames.
+
+- `2026-11-14 21-36-37.mp4`: 26 hits before, 29 after. New: the third 29274
+  (frames 536-537, on top of the first), a 25286 (read in the row
+  "2528695922" in frame 536), and a 4409 that pops in at frame 490 and had
+  been dropped as a repeat of the one a second earlier. 27 of the 29 are right;
+  "109" and "994" remain.
+- `2026-11-14 20-39-26.mp4`: 65 before, 68 after. New: an 11980 popping in
+  over another at frames 328-332, one at 506-510, and the third 10941 at
+  688-692. A 7715 is confirmed 0.7 s earlier.
+- Nine more hits in recordings without Lunar-Bloom, all equal numbers that pop
+  in while or shortly after an earlier one is shown: 471 Physical
+  (`2026-09-05 14-47-13`, 36 to 37), 4604 Pyro and 762 Cryo
+  (`2026-09-05 14-48-50`, 19 to 21), 646 (cryo, 34 to 35), 298, 281 and 261
+  (dendro, 33 to 36), 5165 (hydro, 26 to 27), 1159 (physical, 19 to 20). In
+  the first of these a 931 and a false "100" are confirmed at another moment.
+- Identical hit lists: `2026-09-05 14-50-08`, `2026-11-13 23-37-01`,
+  `2026-11-14 14-34-23`, electro, geo, pyro, and the two recordings without
+  damage.
+
+Tried and removed:
+
+- **Closing gaps in enlarged glyphs.** The outline of the small number
+  underneath runs through the strokes of the enlarged one as dark lines two to
+  four pixels wide. Collecting a glyph over a morphologically closed mask
+  (gaps up to 4 px at 1080p) joined neighboring digits, whose outlines are no
+  further apart, and lost readings that worked before: the first 29274 in
+  three frames, a 95922 in two, a 121065 in four.
+- **Preferring a whole reading of the last two frames over a shorter
+  majority.** Meant for the "994": the 9942 is read as 994 four times while
+  its last digit is covered and whole in one game frame that the recording
+  holds twice. The track is confirmed by the regular vote after 0.6 s, where
+  the rule does not apply, and lowering the three repeats that vote asks of a
+  longer reading would let a neighbor's digit in. Nothing changed in any
+  recording, so the rule was taken out again.
+
+Still open in the pale-arena recording:
+
+- **Three 95922 at frames 471-487, none counted.** The first is alone for
+  three frames, and in two of them small interface icons and a green trail
+  break its "5" ("922" twice). The second pops in at frame 475 ("93922", then
+  "95" twice at 150 and 108 px): its digits are found, but pieces of the first
+  number attached to them widen their boxes and the template scores fall to
+  0.49-0.59. From frame 480 a white flash merges everything. No track there
+  ever establishes the value, which the rule for equal numbers needs.
+- **"109" from a 4409.** The number lies under a Hydro 7715 for twenty frames.
+  Its visible right part is a valid reading ("1" is the stem of the second 4),
+  four frames long, and expires one frame before the number is read whole.
+  Which of two overlapping numbers of different colors is on top cannot be
+  told from the masks: both are cut by an outline.
+- **"994"**, as described above.
+
+Processing time per frame is unchanged: 7.2 ms before and 7.3 ms after on the
+pale-arena recording, 5.8 ms and 5.9 ms on the dark one, each run twice back
+to back. With `--realtime` the dark-arena recording also gives 68 hits.
+
+Not measured: live capture and resolutions other than 720p and 1080p. The 1.5
+growth factor and the 12 % step come from these recordings.

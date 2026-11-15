@@ -85,7 +85,7 @@ impl VisionEngine {
 
         let mut frame_detections = Vec::new();
         for cluster in &clusters {
-            if let Some(hit) = self.matcher.recognize_cluster(cluster, scale) {
+            for (hit, bbox) in self.matcher.recognize_row(cluster, scale) {
                 frame_detections.push(Detection {
                     value: hit.value,
                     element: cluster.element,
@@ -93,8 +93,8 @@ impl VisionEngine {
                     confidence: hit.confidence,
                     x: hit.x + frame.screen_x,
                     y: hit.y + frame.screen_y,
-                    width: cluster.bbox.width,
-                    height: cluster.bbox.height,
+                    width: bbox.width,
+                    height: bbox.height,
                 });
             }
         }
