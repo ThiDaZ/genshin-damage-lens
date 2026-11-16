@@ -7,8 +7,10 @@ pub use matcher::DigitMatcher;
 
 use crate::capture::RawFrame;
 use filter::ColorFilter;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracker::{ConfirmedHit, Detection, HitTracker};
+
+pub use filter::SegmentStats;
 
 /// Ask the scheduler to prefer this process over ordinary work.
 ///
@@ -38,6 +40,52 @@ pub struct VisionEngine {
 pub struct FrameAnalysis {
     pub detections: Vec<Detection>,
     pub hits: Vec<ConfirmedHit>,
+    pub timings: StageTimings,
+}
+
+/// Where the reading time of one frame, or the sum over several, went.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StageTimings {
+    /// Labeling the pixels (or taking over labels computed on the graphics
+    /// card) and cutting the rows into runs.
+    pub label: Duration,
+    /// Connected components and glyph masks.
+    pub components: Duration,
+    /// Splitting components into glyphs and grouping them into rows.
+    pub cluster: Duration,
+    /// Template matching.
+    pub matching: Duration,
+    /// Tracking readings across frames.
+    pub track: Duration,
+    /// Row bands of the labeling step done by the calling thread.
+    pub bands_caller: u32,
+    /// Row bands done by helper threads that woke up in time.
+    pub bands_helpers: u32,
+    /// Frames whose labels came from the graphics card.
+    pub gpu_frames: u32,
+}
+
+impl StageTimings {
+    pub fn add(&mut self, other: &StageTimings) {
+        self.label += other.label;
+        self.components += other.components;
+        self.cluster += other.cluster;
+        self.matching += other.matching;
+        self.track += other.track;
+        self.bands_caller += other.bands_caller;
+        self.bands_helpers += other.bands_helpers;
+        self.gpu_frames += other.gpu_frames;
+    }
+
+    /// Share of the labeling bands that helper threads took, 0 to 1.
+    pub fn helper_share(&self) -> f64 {
+        let total = self.bands_caller + self.bands_helpers;
+        if total == 0 {
+            0.0
+        } else {
+            f64::from(self.bands_helpers) / f64::from(total)
+        }
+    }
 }
 
 impl VisionEngine {
@@ -72,17 +120,37 @@ impl VisionEngine {
     /// Recognize once and expose both stages for live diagnostics.
     pub fn analyze_frame_at(&mut self, frame: &RawFrame, now: Instant) -> FrameAnalysis {
         let scale = (frame.height as f32 / 720.0).max(1.0);
-        let detections = self.detect_frame(frame);
+        let mut timings = StageTimings::default();
+        let detections = self.detect_frame_timed(frame, &mut timings);
+        let started = Instant::now();
         let hits = self.tracker.update_at(&detections, scale, now);
-        FrameAnalysis { detections, hits }
+        timings.track = started.elapsed();
+        FrameAnalysis {
+            detections,
+            hits,
+            timings,
+        }
     }
 
     /// Stateless recognition, also used by the labeled replay evaluator.
     pub fn detect_frame(&self, frame: &RawFrame) -> Vec<Detection> {
-        let scale = (frame.height as f32 / 720.0).max(1.0);
-        let components = ColorFilter::segment_frame(frame);
-        let clusters = ColorFilter::cluster_components_scaled(components, scale);
+        self.detect_frame_timed(frame, &mut StageTimings::default())
+    }
 
+    fn detect_frame_timed(&self, frame: &RawFrame, timings: &mut StageTimings) -> Vec<Detection> {
+        let scale = (frame.height as f32 / 720.0).max(1.0);
+        let mut segment = filter::SegmentStats::default();
+        let components = ColorFilter::segment_frame_timed(frame, &mut segment);
+        timings.label = segment.label;
+        timings.components = segment.components;
+        timings.bands_caller = segment.bands_caller;
+        timings.bands_helpers = segment.bands_helpers;
+        timings.gpu_frames = u32::from(segment.gpu_labels);
+        let started = Instant::now();
+        let clusters = ColorFilter::cluster_components_scaled(components, scale);
+        timings.cluster = started.elapsed();
+
+        let started = Instant::now();
         let mut frame_detections = Vec::new();
         for cluster in &clusters {
             for (hit, bbox) in self.matcher.recognize_row(cluster, scale) {
@@ -98,6 +166,7 @@ impl VisionEngine {
                 });
             }
         }
+        timings.matching = started.elapsed();
 
         frame_detections
     }
@@ -145,6 +214,7 @@ mod tests {
             data: bgra_raw,
             screen_x: 0,
             screen_y: 0,
+            labels: None,
         })
     }
 
@@ -171,6 +241,7 @@ mod tests {
             data: bgra_raw,
             screen_x: 0,
             screen_y: 0,
+            labels: None,
         };
 
         let scale = (raw.height as f32 / 720.0).max(1.0);
@@ -232,6 +303,7 @@ mod tests {
                 data: bgra_raw,
                 screen_x: 0,
                 screen_y: 0,
+                labels: None,
             };
 
             let scale = (raw.height as f32 / 720.0).max(1.0);
@@ -585,6 +657,7 @@ mod tests {
                     data: bgra_raw,
                     screen_x: 0,
                     screen_y: 0,
+                    labels: None,
                 };
                 let confirmed = engine.process_frame_at(
                     &raw,
@@ -643,6 +716,7 @@ mod tests {
                 data: bgra_raw,
                 screen_x: 0,
                 screen_y: 0,
+                labels: None,
             };
 
             // 1. Raw cluster recognitions
@@ -754,6 +828,7 @@ mod tests {
                 data: bgra_raw,
                 screen_x: 0,
                 screen_y: 0,
+                labels: None,
             };
 
             let scale = (raw.height as f32 / 720.0).max(1.0);
