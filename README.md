@@ -1,21 +1,53 @@
-# GenshinDamageLens
+# GenshinDamageLens: Genshin Impact DPS Meter & Damage Overlay
 
 <p align="center">
   <img src="docs/assets/icon.svg" alt="GenshinDamageLens app icon" width="96" />
 </p>
 
-A Windows damage-capture overlay built with Rust, Tauri, DXGI and vanilla JavaScript. It reads visible damage numbers from screenshots and aggregates confirmed hits into rolling DPS, totals, peak hits and elemental breakdowns.
+<p align="center">
+  <a href="https://github.com/ThiDaZ/genshin-damage-lens/actions/workflows/ci.yml"><img src="https://github.com/ThiDaZ/genshin-damage-lens/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6" alt="Platform: Windows 10 and 11" />
+  <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-B7410E" alt="Built with Rust and Tauri" />
+</p>
 
-## Running
+**GenshinDamageLens** is a free DPS meter and damage tracker for **Genshin Impact** on Windows. A small overlay reads the damage numbers that appear on screen and shows your live DPS, total damage, crit rate, biggest hits and damage share by element. Use it to compare team rotations, test artifacts and weapons, or measure character damage on training dummies and in the Spiral Abyss.
 
-Requires Windows 10/11, the Rust MSVC toolchain, Node.js and pnpm.
+It works only from screen pixels, like a screen recorder. It does **not** read game memory, inject code or modify game files.
 
-```powershell
-pnpm install
-pnpm run dev
-# Build the desktop application:
-pnpm run build
-```
+<!-- Screenshot: add a capture of the overlay in combat here, e.g. docs/assets/screenshot.png -->
+
+## Features
+
+- **Live DPS**: damage per second over the last five seconds, with a 30-second trend graph.
+- **Session totals**: total damage, average DPS over time spent fighting, hit count, peak hit and peak DPS.
+- **Crit rate** estimated from the on-screen size of critical hits.
+- **Elemental breakdown**: damage share for Pyro, Hydro, Electro, Cryo, Anemo, Geo, Dendro and Physical.
+- **Recent hits** list, so you can check what was counted.
+- **Click-through mode** (F8), so the overlay stays on top without getting in the way of the game.
+- **Recorder-friendly**: hidden from OBS and Streamlabs by default, or shown in recordings with one switch.
+- **Lightweight**: native Rust with DXGI screen capture, and pixel sorting on the GPU so the CPU stays free for the game.
+
+## Download
+
+Download the latest installer (`.msi` or `.exe`) from the [Releases page](https://github.com/ThiDaZ/genshin-damage-lens/releases). The installers are not code-signed, so Windows SmartScreen shows a warning the first time; choose **More info → Run anyway**.
+
+Genshin Impact usually runs as administrator. If F8 does nothing while the game has focus, run GenshinDamageLens as administrator too.
+
+## FAQ
+
+**Does it read game memory or inject into the game?**
+No. It copies the visible desktop through the Windows DXGI screen-capture API and recognizes digits in that image. It does not open the game process, hook it or change its files.
+
+**Is it allowed by HoYoverse?**
+There is no official statement about tools like this. It uses no memory reading or injection, but no guarantee is given about game policy. Use it at your own risk.
+
+**How accurate is it?**
+It is heuristic OCR, so it can miss or misread numbers that are covered, overlapping or on screen very briefly. Hits are counted about 0.6 seconds after they appear. See [Current limits](#current-limits).
+
+**Does it work with other games, macOS or Linux?**
+No. Recognition is tuned for Genshin Impact's damage numbers, and capture uses Windows-only APIs.
+
+## Using the overlay
 
 The overlay is one small panel on the left edge of the screen; the rest of its window is transparent. It starts in interactive mode: drag it by its title bar (the position is remembered), pause or resume capture, reset the session, or switch to the compact view. Press **F8**, or the lock button, to let clicks pass through to the game; press **F8** again to use the panel. The status line shows **Tracking**, **Waiting for game** or **Paused**. The `···` menu adds simulated hits for trying the panel without the game; reset before measuring real combat.
 
@@ -26,6 +58,17 @@ The panel shows DPS over the last five seconds with a 30-second trend, total dam
 The overlay is hidden from screen capture by default, so recorders such as OBS or Streamlabs do not see it. Turn on **Show in recordings** in the `···` menu to make it capturable (use a display or screen capture source; a game capture source only sees the game). While it is on, the capture loop blanks the panel's box in each frame before reading damage, so the panel never reads its own numbers; damage numbers behind the panel are not counted.
 
 A hit appears about 0.6 s after its number shows in game. That is deliberate: the number is watched across frames before its digits are voted on.
+
+## Building from source
+
+Requires Windows 10/11, the Rust MSVC toolchain, Node.js and pnpm.
+
+```powershell
+pnpm install
+pnpm run dev
+# Build the desktop application:
+pnpm run build
+```
 
 Development builds optimize the application's Rust code as well as dependencies. After changing build settings, stop and restart `pnpm run dev` to rebuild it.
 
