@@ -1,14 +1,18 @@
 //! Replay a recording through the live pipeline and report hits and timing.
 //!
 //! ffmpeg -v error -i clip.mp4 -f rawvideo -pix_fmt bgra - |
-//!     cargo run --release --example video_bench -- 1920 1080 60 [--realtime] [--detections] [--trace] [--mask x,y,w,h]
+//!     cargo run --release --example video_bench -- 1920 1080 60 [--realtime] [--gpu] [--detections] [--trace] [--mask x,y,w,h]
 //!
 //! Default mode processes every frame with recording timestamps (best case).
 //! `--realtime` drops the frames that would have gone by while the previous one
 //! was being processed, which is what the live capture loop experiences.
+//! `--gpu` labels every frame on the graphics card first, as live capture
+//! does, and hands the labels to the reader; the reported times then cover
+//! only what is left for the processor (the upload and the wait for the
+//! graphics card are not part of live capture and are not counted).
 use genshin_damage_lens_lib::{
     capture::RawFrame,
-    vision::{tracker::ConfirmedHit, VisionEngine},
+    vision::{tracker::ConfirmedHit, StageTimings, VisionEngine},
 };
 use std::io::Read;
 use std::time::{Duration, Instant};
@@ -31,7 +35,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
         eprintln!(
-            "Usage: video_bench <width> <height> <fps> [--realtime] [--detections] [--trace] [--mask x,y,w,h]"
+            "Usage: video_bench <width> <height> <fps> [--realtime] [--gpu] [--detections] [--trace] [--mask x,y,w,h]"
         );
         std::process::exit(2);
     }
@@ -40,6 +44,11 @@ fn main() {
     let fps: f64 = args[2].parse().expect("fps");
     let realtime = args.iter().any(|a| a == "--realtime");
     let show_detections = args.iter().any(|a| a == "--detections");
+    #[cfg(windows)]
+    let mut gpu = args.iter().any(|a| a == "--gpu").then(|| {
+        genshin_damage_lens_lib::capture::gpu_labels::GpuLabeler::standalone(width, height)
+            .expect("no graphics device for --gpu")
+    });
     // --mask x,y,w,h blanks a box, e.g. the overlay panel in a recording of it.
     let mask: Option<Vec<usize>> = args
         .iter()
@@ -63,6 +72,7 @@ fn main() {
     let mut hits = 0usize;
     let mut total = 0u64;
     let mut readings = 0usize;
+    let mut stages = StageTimings::default();
 
     loop {
         let mut data = vec![0u8; frame_len];
@@ -81,6 +91,14 @@ fn main() {
                 data[row + x0 * 4..row + x1 * 4].fill(0);
             }
         }
+        #[cfg(windows)]
+        let labels = gpu.as_mut().map(|labeler| {
+            labeler
+                .label_pixels(&data, width as usize * 4)
+                .expect("labeling on the graphics card failed")
+        });
+        #[cfg(not(windows))]
+        let labels = None;
         let frame = RawFrame {
             width,
             height,
@@ -88,6 +106,7 @@ fn main() {
             data,
             screen_x: 0,
             screen_y: 0,
+            labels,
         };
         let now = start + Duration::from_micros((t_ms * 1000.0) as u64);
         let began = Instant::now();
@@ -96,6 +115,7 @@ fn main() {
         busy_until_ms = t_ms + ms;
         times.push(ms);
         processed += 1;
+        stages.add(&analysis.timings);
         readings += analysis.detections.len();
         if show_detections && !analysis.detections.is_empty() {
             let list: Vec<String> = analysis
@@ -130,8 +150,10 @@ fn main() {
             .copied()
             .unwrap_or(0.0)
     };
+    let per_frame = |d: Duration| d.as_secs_f64() * 1000.0 / processed.max(1) as f64;
     println!(
-        "SUMMARY frames={} processed={} readings={} hits={} total_damage={} mean_ms={:.2} p50_ms={:.2} p95_ms={:.2} max_ms={:.2}",
+        "SUMMARY frames={} processed={} readings={} hits={} total_damage={} mean_ms={:.2} p50_ms={:.2} p95_ms={:.2} max_ms={:.2} \
+         labels={} label_ms={:.2} components_ms={:.2} cluster_ms={:.2} match_ms={:.2} track_ms={:.2} helper_share={:.0}%",
         index,
         processed,
         readings,
@@ -140,6 +162,13 @@ fn main() {
         mean,
         pick(0.50),
         pick(0.95),
-        pick(1.0)
+        pick(1.0),
+        if stages.gpu_frames > 0 { "gpu" } else { "cpu" },
+        per_frame(stages.label),
+        per_frame(stages.components),
+        per_frame(stages.cluster),
+        per_frame(stages.matching),
+        per_frame(stages.track),
+        stages.helper_share() * 100.0,
     );
 }
