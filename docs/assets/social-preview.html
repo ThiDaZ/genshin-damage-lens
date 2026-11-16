@@ -1,0 +1,107 @@
+<!doctype html>
+<!-- Source for social-preview.png (GitHub social preview, 1280x640).
+     Render: msedge --headless --hide-scrollbars --window-size=1280,640 --screenshot=social-preview.png social-preview.html -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GenshinDamageLens social preview</title>
+<style>
+  :root {
+    --font: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+    --pyro: #ff8a4c; --hydro: #3db8ff; --cryo: #a5ecf7; --electro: #c58bff;
+    --dendro: #9bdc3c; --anemo: #5fe3c0; --geo: #f5c542; --physical: #e8ebf0;
+    --text: #f2f4f8; --dim: #a3adbf; --faint: #6f7a8d; --accent: #ffd27a;
+    --hair: rgba(255,255,255,.1);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    font-family: var(--font); color: var(--text);
+    background:
+      radial-gradient(900px 500px at 85% 20%, rgba(232,102,42,.22), transparent 60%),
+      radial-gradient(700px 500px at 0% 100%, rgba(61,184,255,.14), transparent 60%),
+      linear-gradient(160deg, #141a26 0%, #0b0e15 100%);
+    position: relative;
+  }
+  /* faint floating damage numbers */
+  .float { position: absolute; font-weight: 800; opacity: .13; letter-spacing: -1px; font-style: italic; }
+
+  .left { position: absolute; left: 80px; top: 92px; width: 640px; }
+  .brand { display: flex; align-items: center; gap: 22px; }
+  .brand img { width: 88px; height: 88px; }
+  .brand h1 { font-size: 54px; font-weight: 700; letter-spacing: -1.5px; line-height: 1; }
+  .tag { margin-top: 34px; font-size: 40px; font-weight: 600; line-height: 1.18; letter-spacing: -.5px; }
+  .tag em { font-style: normal; color: var(--accent); }
+  .sub { margin-top: 20px; font-size: 23px; color: var(--dim); line-height: 1.45; }
+  .chips { margin-top: 38px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .chip { font-size: 19px; font-weight: 600; padding: 9px 18px; border-radius: 999px;
+          border: 1px solid var(--hair); background: rgba(255,255,255,.05); color: var(--dim); }
+
+  .panel { position: absolute; right: 80px; top: 70px; width: 390px; padding: 26px 28px;
+           background: rgba(13,16,23,.9); border: 1px solid var(--hair); border-radius: 22px;
+           box-shadow: 0 30px 80px rgba(0,0,0,.55); }
+  .ph { display: flex; justify-content: space-between; align-items: center; font-size: 16px; color: var(--dim); }
+  .live { display: flex; align-items: center; gap: 8px; color: #4ade80; font-weight: 600; }
+  .live i { width: 9px; height: 9px; border-radius: 50%; background: #4ade80; }
+  .label { margin-top: 20px; font-size: 15px; color: var(--faint); text-transform: uppercase; letter-spacing: 1.5px; font-weight: 600; }
+  .dps { font-size: 66px; font-weight: 700; letter-spacing: -2px; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  svg.spark { display: block; margin-top: 10px; }
+  .stats { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .stat { background: rgba(255,255,255,.055); border-radius: 12px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 13px; color: var(--faint); }
+  .bar { margin-top: 18px; height: 12px; border-radius: 6px; overflow: hidden; display: flex; }
+  .hits { margin-top: 16px; display: grid; gap: 7px; font-size: 17px; font-variant-numeric: tabular-nums; }
+  .hit { display: flex; justify-content: space-between; color: var(--dim); }
+  .hit b { font-weight: 700; }
+</style>
+</head>
+<body>
+  <div class="float" style="left:560px;top:470px;font-size:64px;color:var(--pyro)">48,312</div>
+  <div class="float" style="left:720px;top:560px;font-size:40px;color:var(--hydro)">9,876</div>
+  <div class="float" style="left:40px;top:520px;font-size:44px;color:var(--electro)">17,045</div>
+  <div class="float" style="left:600px;top:40px;font-size:38px;color:var(--cryo)">6,530</div>
+
+  <div class="left">
+    <div class="brand">
+      <img src="icon.svg" alt="">
+      <h1>GenshinDamageLens</h1>
+    </div>
+    <div class="tag">Genshin Impact <em>DPS meter</em><br>&amp; damage overlay</div>
+    <div class="sub">Live DPS, crits and elemental breakdown, read from<br>the screen. No memory reading, no injection.</div>
+    <div class="chips">
+      <span class="chip">Windows 10 / 11</span>
+      <span class="chip">Rust + Tauri</span>
+      <span class="chip">Free &amp; open source</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="ph"><span>GenshinDamageLens</span><span class="live"><i></i>Tracking</span></div>
+    <div class="label">DPS · last 5 s</div>
+    <div class="dps">87,420</div>
+    <svg class="spark" width="334" height="54" viewBox="0 0 334 54">
+      <defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0" stop-color="#ffd27a" stop-opacity=".35"/><stop offset="1" stop-color="#ffd27a" stop-opacity="0"/>
+      </linearGradient></defs>
+      <path d="M0 44 L28 38 L56 40 L84 26 L112 30 L140 18 L168 24 L196 12 L224 20 L252 8 L280 16 L308 6 L334 10 L334 54 L0 54Z" fill="url(#g)"/>
+      <path d="M0 44 L28 38 L56 40 L84 26 L112 30 L140 18 L168 24 L196 12 L224 20 L252 8 L280 16 L308 6 L334 10" fill="none" stroke="#ffd27a" stroke-width="3" stroke-linejoin="round"/>
+    </svg>
+    <div class="stats">
+      <div class="stat"><b>1.94M</b><span>Total</span></div>
+      <div class="stat"><b>68%</b><span>Crit rate</span></div>
+      <div class="stat"><b>48.3K</b><span>Peak hit</span></div>
+    </div>
+    <div class="bar">
+      <i style="flex:42;background:var(--pyro)"></i><i style="flex:24;background:var(--hydro)"></i>
+      <i style="flex:16;background:var(--electro)"></i><i style="flex:10;background:var(--dendro)"></i>
+      <i style="flex:8;background:var(--physical)"></i>
+    </div>
+    <div class="hits">
+      <div class="hit"><span>Pyro · crit</span><b style="color:var(--pyro)">48,312</b></div>
+      <div class="hit"><span>Hydro</span><b style="color:var(--hydro)">9,876</b></div>
+      <div class="hit"><span>Electro · crit</span><b style="color:var(--electro)">17,045</b></div>
+    </div>
+  </div>
+</body>
+</html>
