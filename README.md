@@ -8,6 +8,7 @@
   <a href="https://github.com/ThiDaZ/genshin-damage-lens/actions/workflows/ci.yml"><img src="https://github.com/ThiDaZ/genshin-damage-lens/actions/workflows/ci.yml/badge.svg" alt="CI status" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6" alt="Platform: Windows 10 and 11" />
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-B7410E" alt="Built with Rust and Tauri" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" /></a>
 </p>
 
 **GenshinDamageLens** is a free DPS meter and damage tracker for **Genshin Impact** on Windows. A small overlay reads the damage numbers that appear on screen and shows your live DPS, total damage, crit rate, biggest hits and damage share by element. Use it to compare team rotations, test artifacts and weapons, or measure character damage on training dummies and in the Spiral Abyss.
@@ -181,3 +182,7 @@ Tags must be `v` followed by three numbers; the MSI format accepts nothing else.
 - Small numbers stacked on top of each other (a burst of several low hits in one spot) are still mostly missed.
 - Single digits are still misread at times, mostly on small or overlapping numbers, and an overlapped number can lose its last digit. The hit is counted; its value is off.
 - Neural OCR and Windows Graphics Capture are evaluation candidates, not active backends. Keep a recognizer replacement behind the same labeled replay contract and require measured improvements on held-out recordings before switching.
+
+## License
+
+[MIT](LICENSE) © 2026 ThiDaZ. GenshinDamageLens is an unofficial fan-made tool and is not affiliated with or endorsed by HoYoverse. Genshin Impact is a trademark of HoYoverse.
