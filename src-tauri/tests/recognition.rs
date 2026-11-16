@@ -19,6 +19,7 @@ fn load(name: &str) -> RawFrame {
         data,
         screen_x: 0,
         screen_y: 0,
+        labels: None,
     }
 }
 

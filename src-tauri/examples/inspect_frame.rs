@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         data,
         screen_x: 0,
         screen_y: 0,
+        labels: None,
     };
     let scale = (height as f32 / 720.0).max(1.0);
     let matcher = DigitMatcher::new();

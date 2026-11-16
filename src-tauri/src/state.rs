@@ -91,6 +91,9 @@ pub struct AppState {
     /// The panel's box inside the overlay window, in physical pixels
     /// (x, y, width, height), as reported by the frontend.
     pub panel_rect: Option<(i32, i32, u32, u32)>,
+    /// Label pixels on the graphics card when the capture backend can;
+    /// otherwise, and when this is off, on the processor.
+    pub gpu_labels: bool,
     /// Invalidates pending vision work across session resets and capture changes.
     pub vision_generation: u64,
 }
@@ -112,6 +115,7 @@ impl AppState {
             capture_active: true,
             click_through: false,
             show_in_recordings: false,
+            gpu_labels: true,
             panel_rect: None,
             vision_generation: 0,
         }

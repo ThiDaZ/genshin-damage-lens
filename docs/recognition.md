@@ -398,3 +398,171 @@ to back. With `--realtime` the dark-arena recording also gives 68 hits.
 
 Not measured: live capture and resolutions other than 720p and 1080p. The 1.5
 growth factor and the 12 % step come from these recordings.
+
+## Next to a recorder (2026-11-15)
+
+With Streamlabs recording, the panel showed about 30 ms of reading time per
+frame, hits were missed, and the mouse pointer stuttered.
+
+The reading time was reproduced without the game: `video_bench --realtime` on
+`2026-11-14 21-36-37.mp4` while three `ffmpeg` processes encode 1080p60 with
+x264 (`-preset medium`) on a 16-thread machine. Idle: 8.8 ms per frame, 708 of
+710 frames processed, 29 hits. Loaded: 30 ms, about 520 frames, 23-26 hits.
+
+- **Threads started per frame.** Of those 30 ms, 20 were spent in the labeling
+  step, and the number of worker threads made no difference (1, 2 and 4 all
+  gave 30 ms). Timing inside the step showed why: a thread started for the
+  frame waited about 13 ms before it first ran, while its share of the work
+  took 3 ms. Above-normal priority keeps running threads ahead of the
+  encoders (without it a frame took 100 ms) but does not get a new thread
+  going. The helpers now stay alive between frames, the calling thread works
+  through the row bands itself, and an invitation is withdrawn from any helper
+  that has not begun when the bands run out, so nothing ever waits for a
+  thread to be scheduled. Loaded: 13 ms, 707 of 710 frames, 29 hits. Idle is
+  unchanged, and all fourteen recordings give identical hits.
+- **Pointer movement delivered as frames.** Desktop duplication returns from
+  `AcquireNextFrame` for every pointer movement, with `LastPresentTime` zero
+  and an unchanged image. The capture copied the whole desktop to a staging
+  texture and read it again for each of them. These are now released
+  immediately and the wait continues until a real frame or the 16 ms limit.
+  `capture_bench` still runs (a still desktop gives one frame and 185 waits in
+  three seconds); the effect of pointer movement itself was not measured, and
+  whether this is what made the pointer stutter next to a recorder is not
+  verified.
+
+The encoders are a stand-in: a recorder that encodes on the graphics card
+loads the machine differently, and capture read-back was not part of this test.
+
+**The gain did not carry over to the live app.** `2026-11-15 12-00-32.mp4` was
+recorded with Streamlabs (NVENC H.264) while a release build with both changes
+was running; the panel in the video shows 26-29 ms of reading time, 4.1-4.4 ms
+of capture and 29-32 fps during the fight, against 43-48 fps before it. That is
+the same as in the recording made before the changes (18-27 ms, 32-39 fps). So
+the encoder stand-in above does not reproduce what slows the reader down next
+to the game and a recorder, and where those 26 ms go has not been measured:
+the live loop reports one total, not its stages. Offline, the same footage
+takes 8.6 ms per frame.
+
+The live app counted 26 hits in that fight; replaying the 30 fps recording
+gives 22, one of them a misread of the panel itself. Live capture at about 30
+frames a second is therefore not reading worse than a replay at 30. The one
+difference these numbers show between recording and not recording is frame
+rate. Whether the extra frames are what finds more hits without the recorder
+is an inference, not a measurement: no 60 fps footage of the same fight exists.
+
+### Stage timings and labeling on the graphics card (2026-11-15, later)
+
+Two changes, made to find and to shrink those 26 ms: the live loop reports
+where the reading time goes, and the per-pixel labeling can run on the
+graphics card.
+
+**Stage timings.** `read` in the footer is the sum of the values on the
+footer's second line. The `[Capture diagnostics]` line carries the same
+values, averaged per frame over two seconds, and `video_bench` prints them in
+its `SUMMARY`.
+
+| Footer | Diagnostics | Covers |
+| --- | --- | --- |
+| `label` | `label_ms` | Labeling every pixel by color, or taking over the labels made on the graphics card, and cutting the rows into runs |
+| `shapes` | `components_ms` | Connected components and glyph masks |
+| `group` | `cluster_ms` | Splitting components into glyphs and grouping them into numbers |
+| `match` | `match_ms` + `track_ms` | Template matching, and tracking across frames |
+| `helpers` | `helper_share` | Share of the labeling step's row bands that helper threads took; the capture thread did the rest itself |
+| `GPU` / `CPU` | `labels` | Where the pixels of these frames were labeled |
+
+**Labeling on the graphics card.** After a desktop frame is acquired, one
+draw call writes a label byte for every pixel: a pixel shader loads the pixel
+and looks its color up in a 256×256×256 texture that is a copy of the
+processor's label table (`flat_label_table`, built from `label_pixel`). No
+color math is repeated in the shader and both fetches are integer loads. The
+label image is read back one call late, like the frame itself, and travels in
+`RawFrame::labels`. `label_frame` then copies label rows where it used to
+classify pixels; clearing the skill zone, cutting runs and everything after
+is the same code for both sources. Frames without labels (replays, tests,
+examples, the fallback) are labeled on the processor as before.
+
+The `···` menu has **Read on GPU**, on by default and remembered with the
+panel's position. If the shader path cannot be set up (no shader compiler,
+the device refuses a texture or a shader), the processor labels the frames
+whatever the setting says, the menu entry shows "not available" with the
+reason in its tooltip, and the footer says `CPU`. The footer always states
+what was done to the frames of the last two seconds, not what was asked for.
+`GDL_NO_GPU_LABELS=1` makes the shader path count as unavailable, to try the
+fallback on a machine where it works.
+
+Desktop duplication, and with it the shader, runs on the adapter the display
+is attached to. On the laptop these measurements were made on that is Intel
+UHD Graphics, not the NVIDIA card that renders the game and encodes the
+recording. The adapter's name is in the diagnostics line (`adapter`), in the
+footer's tooltip and in `capture_bench`'s first line.
+
+**Equal results.**
+
+- Every color: `capture::gpu_labels::tests` runs all 16,777,216 colors as one
+  4096×4096 image through the shader and compares the result with the
+  processor's labels, on the graphics card and on the software rasterizer
+  (the only device a build server has). Both are identical. With red and blue
+  swapped in the shader on purpose, the test fails at the first such color.
+- Desktop frames: `capture::dxgi::tests` captures the real desktop at an odd
+  crop offset and compares each frame's labels with the processor's labels of
+  the same pixels, then switches to the processor and expects frames without
+  labels. It is skipped where no desktop can be duplicated (a build server, a
+  sleeping screen). `capture_bench` does the same comparison on every frame
+  it captures and fails on the first differing byte: 374 to 494 frames per
+  three-second run here, all equal.
+- Recordings: all fifteen under `sample_video` (eight combat recordings and
+  the seven element recordings) give the same hit lists as before the change
+  through the processor path, and the same lists again with `video_bench
+  --gpu`, which labels each frame on the graphics card first.
+- The panel mask (`mask_panel`) clears the labels in the panel's box together
+  with the pixels.
+
+**Measured on this machine, without the game.** 1080p, `2026-11-14
+21-36-37.mp4` (pale arena), 29 hits in every run below.
+
+| | Processor | Graphics card |
+| --- | --- | --- |
+| `video_bench --realtime`, idle | 8.0 ms (label 2.7, shapes 3.0, group 1.8) | 5.6 ms (label 0.8, shapes 2.7, group 1.7) |
+| `video_bench --realtime`, three x264 encoders | 13.4 ms (label 3.4, shapes 5.8, group 3.1) | 10.9 ms (label 1.3, shapes 5.3, group 3.1) |
+| `capture_bench`, copy and read-back per frame | 1.6-1.75 ms | 1.85-2.0 ms |
+| Release app reading `stand_in_game` at 30 fps | read 8.0 ms, capture 1.9 ms | read 6.8 ms, capture 2.3 ms |
+
+`video_bench --gpu` does not count the upload of the frame or the wait for
+the graphics card, which live capture does not have. `stand_in_game` (an
+example) plays a recording in a window of the game's class and title, so the
+release app captures and reads it like the game: both runs tracked at 30 fps
+and counted 29 hits, as the offline replay does. The footer and the menu
+were read from that running app through the webview's debugging port, in
+both states (`GPU`, and `CPU` with "not available").
+
+So on an otherwise idle machine the graphics card takes about 2 ms of
+labeling per frame off the processor in a replay and 1.3 ms in the live loop,
+for 0.3-0.4 ms more capture time (a second, smaller read-back). What is left
+of `label` is the copy of the label rows and the run cutting. With labeling
+gone, `shapes` and `group` are five of the remaining six milliseconds.
+
+**Still on the processor.** The frame's pixels are still read back in full:
+the Physical outline checks (`has_dark_outline`, `has_contrasting_stroke`)
+read them around white components. Connected components, glyph masks,
+grouping, matching and tracking are unchanged.
+
+**Not measured: the effect next to the game and Streamlabs.** That needs the
+game. The x264 stand-in doubled `shapes` and `group` and added little to
+`label`, and helper threads took about 75 % of the bands in every run here;
+neither needs to hold next to the game, where the whole frame took 26-29 ms.
+Whether labeling is what takes those milliseconds, and so whether moving it
+helps, is exactly what the next recording shows. To record:
+
+1. Run a release build of this tree, turn on **Show in recordings** in the
+   `···` menu and leave the compact view off, so both footer lines are in the
+   video.
+2. Record with Streamlabs as before. Stand still for a few seconds, then
+   fight for about half a minute with **Read on GPU** on.
+3. Switch **Read on GPU** off in the menu and repeat: a few seconds standing,
+   half a minute of the same kind of fight.
+
+The footer then answers: which of `label`, `shapes`, `group` and `match`
+holds the reading time during a fight; whether the helper threads get to run
+at all next to the game (`helpers` near 0 % means the capture thread labels
+alone); and what the graphics card changes (`read`, `capture` and the frame
+rate in the status line, `GPU` against `CPU`).

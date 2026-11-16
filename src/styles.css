@@ -238,6 +238,12 @@ button {
   color: var(--ok);
 }
 
+/* Chosen, but this machine cannot do it: the fallback is in use. */
+.menu-item.on.unavailable::after {
+  content: " · not available";
+  color: var(--warn);
+}
+
 /* ── Click-through: nothing is clickable, so say so and get out of the way ── */
 .lock-hint {
   display: none;
@@ -516,6 +522,17 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* While tracking: a summary line and where the reading time went. */
+.foot-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.foot-line + .foot-line {
+  margin-top: 2px;
+  font-size: 10px;
 }
 
 .compact .foot {
