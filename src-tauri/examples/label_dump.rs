@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         data,
         screen_x: 0,
         screen_y: 0,
+        labels: None,
     };
     for c in ColorFilter::segment_frame(&raw) {
         let b = c.bbox;
