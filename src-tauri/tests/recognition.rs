@@ -19,6 +19,7 @@ fn load(name: &str) -> RawFrame {
         data,
         screen_x: 0,
         screen_y: 0,
+        labels: None,
     }
 }
 
@@ -63,6 +64,19 @@ fn reads_large_physical_impact_number_from_live_combat() {
             .any(|hit| hit.value == 1215 && hit.element == ElementType::Physical),
         "The large animated Physical 1215 must survive size filtering: {hits:?}"
     );
+}
+
+#[test]
+fn reads_slanted_gradient_lunar_bloom_numbers() {
+    let engine = VisionEngine::new();
+    let hits = engine.detect_frame(&load("lunar-bloom.png"));
+    let values: Vec<_> = hits.iter().map(|h| (h.value, h.element)).collect();
+    assert_eq!(
+        values.len(),
+        3,
+        "Three unobstructed Lunar-Bloom 10941 numbers of different sizes: {hits:?}"
+    );
+    assert!(values.iter().all(|&v| v == (10941, ElementType::Dendro)));
 }
 
 #[test]

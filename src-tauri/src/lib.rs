@@ -106,12 +106,35 @@ fn mask_panel(frame: &mut capture::RawFrame, origin: (i32, i32), rect: (i32, i32
     if x0 >= x1 {
         return;
     }
+    let width = frame.width as usize;
     for y in y0..y1 {
         let row = y * frame.stride;
         if let Some(pixels) = frame.data.get_mut(row + x0 * 4..row + x1 * 4) {
             pixels.fill(0);
         }
+        // Labels that came with the frame were made from the pixels as they
+        // were. Black is background.
+        if let Some(labels) = &mut frame.labels {
+            if let Some(labels) = labels.get_mut(y * width + x0..y * width + x1) {
+                labels.fill(0);
+            }
+        }
     }
+}
+
+/// Read damage on the graphics card or on the processor. The answer is what
+/// was stored; whether the graphics card can do it at all is reported with
+/// the capture diagnostics.
+#[tauri::command]
+fn set_gpu_labels(enabled: bool, state: State<'_, SharedState>) -> bool {
+    state.lock().gpu_labels = enabled;
+    enabled
+}
+
+/// Close button on the overlay: the window has no taskbar entry to close from.
+#[tauri::command]
+fn quit_app(app_handle: AppHandle) {
+    app_handle.exit(0);
 }
 
 #[tauri::command]
@@ -245,6 +268,8 @@ fn spawn_hotkey_thread(app_handle: AppHandle, state: SharedState) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Stay responsive while the game and a recorder load every core.
+    vision::prefer_this_process();
     let shared_state: SharedState = Arc::new(parking_lot::Mutex::new(AppState::new()));
     let running = Arc::new(AtomicBool::new(true));
 
@@ -258,6 +283,8 @@ pub fn run() {
             set_capture_active,
             set_show_in_recordings,
             set_panel_rect,
+            set_gpu_labels,
+            quit_app,
             simulate_hit,
         ])
         .setup(move |app| {
@@ -299,20 +326,23 @@ pub fn run() {
                 let mut diagnostic_candidates = 0usize;
                 let mut diagnostic_hits = 0usize;
                 let mut diagnostic_ocr_ms = 0.0;
+                let mut diagnostic_copy_ms = 0.0;
                 let mut diagnostic_size = (0, 0);
+                let mut diagnostic_stages = vision::StageTimings::default();
 
                 while running_clone.load(Ordering::Relaxed) {
                     let loop_start = Instant::now();
 
-                    let (is_active, generation, panel) = {
+                    let (is_active, generation, panel, gpu_labels) = {
                         let s = state_clone.lock();
                         let panel = if s.show_in_recordings {
                             s.panel_rect
                         } else {
                             None
                         };
-                        (s.capture_active, s.vision_generation, panel)
+                        (s.capture_active, s.vision_generation, panel, s.gpu_labels)
                     };
+                    capture.set_gpu_labels(gpu_labels);
                     // The overlay window rarely moves; ask for its position
                     // twice a second rather than every frame.
                     if panel.is_some()
@@ -343,7 +373,11 @@ pub fn run() {
                                 diagnostic_frames += 1;
                                 diagnostic_candidates += analysis.detections.len();
                                 diagnostic_ocr_ms += observed_at.elapsed().as_secs_f64() * 1000.0;
+                                diagnostic_copy_ms += capture.last_copy_ms();
                                 diagnostic_size = (frame.width, frame.height);
+                                diagnostic_stages.add(&analysis.timings);
+                                // The pixel buffer goes back for the next frame.
+                                capture.recycle(frame);
                                 analysis.hits
                             }
                             CaptureOutcome::NoNewFrame => vision.no_new_frame(Instant::now()),
@@ -390,11 +424,47 @@ pub fn run() {
                         } else {
                             0.0
                         };
+                        // Average milliseconds per frame of one stage.
+                        let per_frame = |total: Duration| {
+                            if diagnostic_frames > 0 {
+                                total.as_secs_f64() * 1000.0 / f64::from(diagnostic_frames)
+                            } else {
+                                0.0
+                            }
+                        };
+                        let stages = &diagnostic_stages;
                         let diagnostics = serde_json::json!({
                             "status": last_capture_status, "fps": fps,
                             "width": diagnostic_size.0, "height": diagnostic_size.1,
                             "candidates": diagnostic_candidates, "hits": diagnostic_hits,
                             "processing_ms": average_ms,
+                            "capture_ms": if diagnostic_frames > 0 {
+                                diagnostic_copy_ms / f64::from(diagnostic_frames)
+                            } else {
+                                0.0
+                            },
+                            // Where the reading time went, per frame.
+                            "label_ms": per_frame(stages.label),
+                            "components_ms": per_frame(stages.components),
+                            "cluster_ms": per_frame(stages.cluster),
+                            "match_ms": per_frame(stages.matching),
+                            "track_ms": per_frame(stages.track),
+                            // Share of the labeling bands that helper threads
+                            // took; the capture thread did the rest itself.
+                            "helper_share": stages.helper_share(),
+                            // Where the pixels of these frames were labeled,
+                            // what the user asked for, and why the graphics
+                            // card is not doing it if it cannot.
+                            "labels": if stages.gpu_frames * 2 > diagnostic_frames {
+                                "gpu"
+                            } else {
+                                "cpu"
+                            },
+                            "gpu_requested": gpu_labels,
+                            "gpu_error": capture.gpu_labels_error(),
+                            // The adapter the display is attached to: the
+                            // one that captures and labels.
+                            "adapter": capture.adapter_name(),
                         });
                         if last_capture_status == "tracking" {
                             println!("[Capture diagnostics] {diagnostics}");
@@ -405,6 +475,8 @@ pub fn run() {
                         diagnostic_candidates = 0;
                         diagnostic_hits = 0;
                         diagnostic_ocr_ms = 0.0;
+                        diagnostic_copy_ms = 0.0;
+                        diagnostic_stages = vision::StageTimings::default();
                     }
 
                     if last_stats_emit.elapsed() >= Duration::from_millis(250) {
@@ -446,7 +518,25 @@ mod tests {
             data: vec![255; (width * height * 4) as usize],
             screen_x: screen.0,
             screen_y: screen.1,
+            labels: None,
         }
+    }
+
+    #[test]
+    fn panel_mask_also_blanks_labels_that_came_with_the_frame() {
+        let mut f = frame(200, 100, (0, 0));
+        f.labels = Some(vec![7; 200 * 100]);
+        mask_panel(&mut f, (0, 0), (50, 20, 40, 30));
+        let labels = f.labels.as_ref().unwrap();
+        // Exactly the pixels that were painted black lost their label.
+        for y in 0..100 {
+            for x in 0..200 {
+                let black = f.data[y * f.stride + x * 4] == 0;
+                assert_eq!(labels[y * 200 + x] == 0, black, "{x},{y}");
+            }
+        }
+        assert_eq!(labels[30 * 200 + 60], 0);
+        assert_eq!(labels[80 * 200 + 150], 7);
     }
 
     #[test]

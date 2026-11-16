@@ -16,7 +16,6 @@ const view = {
   passthrough: false,
   paused: false,
   status: "unavailable",
-  demo: null,
   spark: [],
   seenHits: new Set(),
   lastHits: [],
@@ -157,13 +156,41 @@ function renderStatus(status) {
 }
 
 function renderDiagnostics(d) {
+  // Whether the graphics card can label pixels is known as soon as capture runs.
+  $("btn-gpu").classList.toggle("unavailable", Boolean(d.gpu_error));
+  $("btn-gpu").title = d.gpu_error
+    ? `Not available on this machine, the processor does it: ${d.gpu_error}`
+    : "Sort the screen's pixels by color on the graphics card instead of the processor";
   if (d.status !== "tracking") return;
   $("status-text").textContent = `Tracking · ${Math.round(d.fps)} fps`;
-  $("capture-details").textContent =
-    `${d.width}×${d.height} · ${d.processing_ms.toFixed(1)} ms per frame · ` +
-    `${d.hits} hits / ${d.candidates} readings`;
+  const ms = (value) => (Number.isFinite(value) ? value : 0).toFixed(1);
+  const helpers = Math.round((Number.isFinite(d.helper_share) ? d.helper_share : 0) * 100);
+  // Where the pixels were labeled in these two seconds, not what was asked for.
+  const where = d.labels === "gpu" ? "GPU" : "CPU";
+  $("capture-details").replaceChildren(
+    el(
+      "div",
+      "foot-line",
+      `${d.width}×${d.height} · ${where} · read ${ms(d.processing_ms)} ms · ` +
+        `capture ${ms(d.capture_ms)} ms · ${d.hits} hits`,
+    ),
+    // The parts of "read": they add up to it.
+    el(
+      "div",
+      "foot-line",
+      `label ${ms(d.label_ms)} · shapes ${ms(d.components_ms)} · group ${ms(d.cluster_ms)} · ` +
+        `match ${ms(d.match_ms + d.track_ms)} · helpers ${helpers}%`,
+    ),
+  );
   $("capture-details").title =
-    "Readings are single-frame number sightings. A hit is one number confirmed across frames.";
+    `Per frame: ${ms(d.processing_ms)} ms reading numbers, ${ms(d.capture_ms)} ms copying the ` +
+    `screen. Reading is: ${ms(d.label_ms)} ms sorting pixels by color ` +
+    `(${where === "GPU" ? `done on ${d.adapter || "the graphics card"}, this is taking over its result` : "on the processor"}), ` +
+    `${ms(d.components_ms)} ms finding connected shapes, ${ms(d.cluster_ms)} ms grouping them ` +
+    `into numbers, ${ms(d.match_ms)} ms matching digits, ${ms(d.track_ms)} ms tracking. ` +
+    `Helper threads did ${helpers}% of the first step, the capture thread the rest. ` +
+    `${d.candidates} single-frame readings became ${d.hits} confirmed hits in the last two ` +
+    "seconds. Frame rate is in the status line above.";
 }
 
 function renderPassthrough(on) {
@@ -203,25 +230,6 @@ async function reset() {
   }
 }
 
-async function testHit() {
-  if (invoke) {
-    await invoke("simulate_hit", { element: null, isCrit: null });
-  } else {
-    mock.hit();
-  }
-}
-
-function toggleDemo() {
-  const button = $("btn-auto-sim");
-  if (view.demo) {
-    clearInterval(view.demo);
-    view.demo = null;
-  } else {
-    view.demo = setInterval(testHit, 450);
-  }
-  button.classList.toggle("on", Boolean(view.demo));
-}
-
 // Recorders only see the overlay when it is not excluded from screen capture.
 // The capture backend then blanks the panel's box so it never reads itself.
 async function setShowInRecordings(on) {
@@ -235,6 +243,22 @@ async function setShowInRecordings(on) {
   }
   $("btn-recordings").classList.toggle("on", on);
   savePlacement({ recordings: on });
+}
+
+// Sort pixels by color on the graphics card, or on the processor. The backend
+// falls back to the processor by itself when the graphics card cannot do it;
+// the footer shows which one is at work.
+async function setGpuLabels(on) {
+  if (invoke) {
+    try {
+      await invoke("set_gpu_labels", { enabled: on });
+    } catch (error) {
+      console.warn("Could not change where pixels are read:", error);
+      return;
+    }
+  }
+  $("btn-gpu").classList.toggle("on", on);
+  savePlacement({ gpu: on });
 }
 
 // Tell the backend where the panel is, in physical pixels of the window.
@@ -264,7 +288,6 @@ function toggleMenu() {
 function setCompact(on) {
   document.body.classList.toggle("compact", on);
   $("btn-compact").classList.toggle("on", on);
-  $("btn-compact").title = on ? "Full view" : "Compact view";
   savePlacement({ compact: on });
 }
 
@@ -336,25 +359,6 @@ const mock = {
     };
     renderStats(this.stats);
   },
-  hit() {
-    const s = this.stats;
-    const element = ELEMENTS[Math.floor(Math.random() ** 2 * ELEMENTS.length)];
-    const is_crit = Math.random() < 0.6;
-    const value = Math.floor(is_crit ? 9000 + Math.random() * 30000 : 1500 + Math.random() * 6000);
-    const now = Date.now();
-    const last = this.hits[0];
-    s.combat_secs += last && now - last.timestamp_ms <= 5000 ? (now - last.timestamp_ms) / 1000 : 1;
-    this.hits.unshift({ id: now + Math.random(), timestamp_ms: now, value, element, is_crit });
-    this.hits.length = Math.min(this.hits.length, 200);
-    s.total_damage += value;
-    s.total_hits += 1;
-    s.crit_hits += is_crit ? 1 : 0;
-    s.crit_rate_pct = (s.crit_hits / s.total_hits) * 100;
-    s.avg_dps = Math.round(s.total_damage / Math.max(1, s.combat_secs));
-    if (value > s.peak_hit) [s.peak_hit, s.peak_element] = [value, element];
-    s.elemental_breakdown[element] = (s.elemental_breakdown[element] || 0) + value;
-    this.tick();
-  },
   tick() {
     const s = this.stats;
     const cutoff = Date.now() - 5000;
@@ -384,17 +388,24 @@ async function start() {
     setCompact(!document.body.classList.contains("compact")),
   );
   $("btn-more").addEventListener("click", toggleMenu);
-  $("btn-simulate").addEventListener("click", testHit);
-  $("btn-auto-sim").addEventListener("click", toggleDemo);
+  $("btn-close").addEventListener("click", () => {
+    if (invoke) invoke("quit_app");
+    else window.close();
+  });
   $("btn-recenter").addEventListener("click", recenter);
   $("btn-recordings").addEventListener("click", () =>
     setShowInRecordings(!$("btn-recordings").classList.contains("on")),
+  );
+  $("btn-gpu").addEventListener("click", () =>
+    setGpuLabels(!$("btn-gpu").classList.contains("on")),
   );
   // The panel grows and shrinks with its content and the compact view.
   new ResizeObserver(reportPanelRect).observe(panel);
   window.addEventListener("resize", reportPanelRect);
   reportPanelRect();
   if (placement.recordings) await setShowInRecordings(true);
+  // On unless it was switched off.
+  await setGpuLabels(placement.gpu !== false);
   document.addEventListener("pointerdown", (event) => {
     if (!event.target.closest("#menu, #btn-more")) closeMenu();
   });
@@ -418,7 +429,7 @@ async function start() {
     });
     renderStatus("unavailable");
     $("status-text").textContent = "Preview · no capture";
-    $("capture-details").textContent = "Browser preview. Use the ··· menu to add test hits.";
+    $("capture-details").textContent = "Browser preview. No capture.";
     mock.reset();
     setInterval(() => mock.tick(), 250);
   }

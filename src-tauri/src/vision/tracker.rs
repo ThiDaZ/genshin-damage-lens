@@ -33,12 +33,31 @@ const CONFIRM_DELAY: Duration = Duration::from_millis(600);
 /// A damage number is on screen for roughly 1.3 s. A confirmed track is kept
 /// that long so a number hidden by an effect is not counted again on return.
 const NUMBER_LIFETIME: Duration = Duration::from_millis(1600);
+/// Shortest time a number must be seen to count when it vanishes early.
+const MIN_VISIBLE: Duration = Duration::from_millis(60);
 /// Text that never moves or resizes for this long is HUD, not damage.
 const STATIC_LIMIT: Duration = Duration::from_millis(2500);
+/// A number covered this soon after it appeared may count on a steady drift
+/// that is still too short to prove it moved.
+const BRIEF: Duration = Duration::from_millis(500);
 const VOTE_WINDOW: usize = 64;
+/// A number pops in at several times its final size and only ever shrinks.
+/// A reading this much taller than a number that has settled is therefore
+/// not that number again but an equal one popping in on top of it.
+const POP_IN_GROWTH: f32 = 1.5;
 
 fn digits_contain(whole: u32, part: u32) -> bool {
     whole != part && whole.to_string().contains(&part.to_string())
+}
+
+/// Could `b` be a reading of the number `a`? The same value, a fragment or a
+/// longer reading of it, or the same length with a single digit misread.
+fn digits_related(a: u32, b: u32) -> bool {
+    if a == b || digits_contain(a, b) || digits_contain(b, a) {
+        return true;
+    }
+    let (a, b) = (a.to_string(), b.to_string());
+    a.len() == b.len() && a.bytes().zip(b.bytes()).filter(|(x, y)| x != y).count() <= 1
 }
 
 fn center(d: &Detection) -> (f32, f32) {
@@ -65,6 +84,10 @@ struct TrackedHit {
     /// Confirmed this frame, not yet handed out.
     pending: Option<ConfirmedHit>,
     suppressed: bool,
+    /// Started enlarged on top of a settled number that reads the same.
+    twin: bool,
+    /// Frames in which only some digits of the enlarged number were read.
+    partial_frames: u32,
 }
 
 impl TrackedHit {
@@ -85,7 +108,22 @@ impl TrackedHit {
             emitted_value: None,
             pending: None,
             suppressed: false,
+            twin: false,
+            partial_frames: 0,
         }
+    }
+
+    /// The largest of the last three heights read: one reading with its lower
+    /// part cut off must not make the next whole one look like growth.
+    fn recent_height(&self) -> u32 {
+        let recent = self.observations.iter().rev().take(3);
+        recent.map(|d| d.height).max().unwrap_or(self.last.height)
+    }
+
+    /// Is `d` too large to be this number, which has been seen at least twice?
+    fn outgrown_by(&self, d: &Detection) -> bool {
+        self.observations.len() >= 2
+            && d.height as f32 >= self.recent_height() as f32 * POP_IN_GROWTH
     }
 
     fn predicted_center(&self, now: Instant) -> (f32, f32) {
@@ -170,10 +208,15 @@ impl TrackedHit {
                     (d.value, same.count())
                 })
                 .max_by_key(|c| c.1)
-                .map_or(0, |c| c.0);
+                .unwrap_or((0, 0));
+            // Two or more extra digits multiply the value a hundredfold. A
+            // neighbor's digits glued on can repeat for a few frames, so such
+            // a reading must also be seen at least as often as the fragment.
+            let trusted = longer == majority + 1 || repeats >= fragment.1;
             if repeats >= 3
                 && repeats * 5 >= count[longer] * 3
-                && digits_contain(candidate, fragment)
+                && trusted
+                && digits_contain(candidate, fragment.0)
             {
                 len = longer;
                 break;
@@ -228,6 +271,27 @@ impl TrackedHit {
         !self.emitted && !self.suppressed && self.moved
     }
 
+    /// A settled number floats slowly, about a pixel per frame. In a burst the
+    /// next hit pops in over it before it has covered the distance that proves
+    /// movement. HUD text does not float: its box sits still or jitters back
+    /// and forth. So a short track also counts as moving when every step went
+    /// the same way and the steps add up to two thirds of that distance.
+    fn drifted(&self, scale: f32) -> bool {
+        if self.observations.len() < 4 {
+            return false;
+        }
+        let centers: Vec<(f32, f32)> = self.observations.iter().map(center).collect();
+        let (first, last) = (centers[0], centers[centers.len() - 1]);
+        let steady = |axis: fn(&(f32, f32)) -> f32| {
+            let net = axis(&last) - axis(&first);
+            net.abs() >= 2.0 * scale
+                && centers
+                    .windows(2)
+                    .all(|w| (axis(&w[1]) - axis(&w[0])) * net.signum() >= 0.0)
+        };
+        steady(|c| c.0) || steady(|c| c.1)
+    }
+
     /// Two-digit readings are what sparks and foliage most often look like.
     /// A real one is read in most frames; noise flickers in and out.
     fn plausible(&self, value: u32) -> bool {
@@ -249,16 +313,52 @@ impl TrackedHit {
 
     /// Last chance when the number disappears: readings that were too noisy
     /// for a clear majority still count when one value kept recurring.
-    fn confirm_on_expiry(&mut self, now: Instant) {
-        // A few frames of agreement is how scenery noise looks, too.
+    fn confirm_on_expiry(&mut self, now: Instant, scale: f32) {
+        // In a burst of hits each number is readable only until the next one
+        // pops in over it, so the bar is time on screen, not a frame count:
+        // capture may run at 20 or at 60 frames a second.
         let seen_for = self.last_seen.saturating_duration_since(self.created_at);
-        if self.eligible(now)
-            && (seen_for >= Duration::from_millis(150) || self.observations.len() >= 6)
+        if self.eligible(now) && seen_for >= MIN_VISIBLE {
+            let voted = self.vote(3, 0.40).or_else(|| self.repeated_long_reading());
+            if let Some((value, crit)) = voted.filter(|v| self.plausible(v.0)) {
+                self.emit(value, crit);
+            }
+        } else if !self.emitted
+            && !self.suppressed
+            && (MIN_VISIBLE..=BRIEF).contains(&seen_for)
+            && self.drifted(scale)
         {
-            if let Some((value, crit)) = self.vote(3, 0.40).filter(|v| self.plausible(v.0)) {
+            // Less proof of movement, so more agreement between readings.
+            if let Some((value, crit)) = self.vote(4, 0.75).filter(|v| v.0 >= 100) {
                 self.emit(value, crit);
             }
         }
+        // No test for static text here: that never appears enlarged.
+        if !self.emitted && self.twin {
+            // The second or third of several equal hits is whole only while
+            // it is enlarged on top of the others, often for two frames. Its
+            // value needs no vote: the number underneath established it. What
+            // has to be shown is that another one appeared, and the size
+            // shows that. It must still be seen in two frames, whole in one.
+            let value = self.first.value;
+            let whole = self.observations.iter().all(|d| d.value == value);
+            if whole && self.observations.len() as u32 + self.partial_frames >= 2 {
+                self.emit(value, self.first.is_crit);
+            }
+        }
+    }
+
+    /// A number of four or more digits that came into view digit by digit and
+    /// was then read whole in the last two frames before it vanished. Noise
+    /// does not repeat that many digits, and junk glued to a number changes.
+    fn repeated_long_reading(&self) -> Option<(u32, bool)> {
+        let n = self.observations.len();
+        if n < 3 {
+            return None;
+        }
+        let last = self.observations[n - 1];
+        (last.value >= 1000 && self.observations[n - 2].value == last.value)
+            .then_some((last.value, last.is_crit))
     }
 
     /// No longer a candidate for new readings.
@@ -278,6 +378,8 @@ pub struct HitTracker {
     active_tracks: Vec<TrackedHit>,
     last_update: Option<Instant>,
     frame: u64,
+    /// Resolution scale of the latest frame, for tracks that end between frames.
+    scale: f32,
     /// Print tracks that end without a confirmed hit (diagnostics only).
     pub trace: bool,
 }
@@ -294,6 +396,7 @@ impl HitTracker {
             active_tracks: Vec::with_capacity(32),
             last_update: None,
             frame: 0,
+            scale: 1.0,
             trace: false,
         }
     }
@@ -307,8 +410,8 @@ impl HitTracker {
             if !t.finished(now) || t.emitted {
                 continue;
             }
-            t.confirm_on_expiry(now);
-            if self.trace && !t.emitted && t.observations.len() >= 2 {
+            t.confirm_on_expiry(now, self.scale);
+            if self.trace && !t.emitted && (t.observations.len() >= 2 || t.twin) {
                 let values: Vec<u32> = t.observations.iter().map(|d| d.value).collect();
                 eprintln!(
                     "[dropped track] {:?} at ({},{}) moved={} static={} readings={:?}",
@@ -338,6 +441,30 @@ impl HitTracker {
                     && track.created_at.saturating_duration_since(other.created_at)
                         <= NUMBER_LIFETIME
                     && other.last_seen < track.created_at
+                    // A number coming back has not grown since.
+                    && (track.first.height as f32) < other.last.height as f32 * POP_IN_GROWTH
+            });
+            // A short-lived misreading of a number that has its own track: the
+            // first frames of a pop-in often read only some of its digits.
+            let fragment = self.active_tracks.iter().enumerate().any(|(j, other)| {
+                if j == i || other.last.element != hit.element || other.suppressed {
+                    return false;
+                }
+                let whole = other
+                    .emitted_value
+                    .or_else(|| other.vote(1, 0.0).map(|v| v.0))
+                    .unwrap_or(other.last.value);
+                let apart = if other.created_at > track.created_at {
+                    other.created_at.saturating_duration_since(track.created_at)
+                } else {
+                    track.created_at.saturating_duration_since(other.created_at)
+                };
+                let (tx, ty) = center(&track.last);
+                let near = [&other.first, &other.last].iter().any(|d| {
+                    let (ox, oy) = center(d);
+                    (tx - ox).abs() <= d.width as f32 && (ty - oy).abs() <= d.height as f32 * 1.5
+                });
+                digits_contain(whole, hit.value) && apart <= NUMBER_LIFETIME && near
             });
             if self.trace {
                 let values: Vec<u32> = track.observations.iter().map(|d| d.value).collect();
@@ -353,10 +480,15 @@ impl HitTracker {
                     values
                 );
             }
-            if !repeat {
+            if repeat || fragment {
+                if self.trace {
+                    let why = if repeat { "repeat" } else { "fragment" };
+                    eprintln!("[{why} dropped] {} {:?}", hit.value, hit.element);
+                }
+                // Not a hit of its own, and no guard for later ones either.
+                self.active_tracks[i].emitted_value = None;
+            } else {
                 out.push(hit);
-            } else if self.trace {
-                eprintln!("[repeat dropped] {} {:?}", hit.value, hit.element);
             }
         }
     }
@@ -379,6 +511,7 @@ impl HitTracker {
         } else {
             1.0
         };
+        self.scale = scale;
         let mut confirmed = Vec::new();
         self.expire(now, &mut confirmed);
         let valid: Vec<_> = detections
@@ -404,6 +537,60 @@ impl HitTracker {
             .map(|t| t.vote(1, 0.0).map_or(t.last.value, |v| v.0))
             .collect();
 
+        // A track that has read one value three times is that number. In a
+        // pile of small hits its neighbors sit a few pixels away; a reading
+        // that differs by more than one digit is one of them, not a misread,
+        // and must not be voted into this track digit by digit.
+        let locked: Vec<bool> = self
+            .active_tracks
+            .iter()
+            .zip(&known)
+            .map(|(t, &value)| t.observations.iter().filter(|d| d.value == value).count() >= 3)
+            .collect();
+        let mut used_tracks = vec![false; self.active_tracks.len()];
+        let mut used_detections = vec![false; valid.len()];
+
+        // Fragments first. When two numbers overlap, each loses digits to the
+        // other; left for the pairing below, the fragment of one would be taken
+        // for a new reading of its neighbor and drag that track off its number.
+        for (di, d) in valid.iter().enumerate() {
+            let (cx, cy) = center(d);
+            for (ti, track) in self.active_tracks.iter_mut().enumerate() {
+                if track.last.element != d.element || !digits_contain(known[ti], d.value) {
+                    continue;
+                }
+                let (px, py) = track.predicted_center(now);
+                let (lx, ly) = center(&track.last);
+                let half_w = track.last.width.max(d.width) as f32 * 0.75 + 8.0 * scale;
+                let half_h = track.last.height.max(d.height) as f32 * 0.5 + 8.0 * scale;
+                let inside = |x: f32, y: f32| (cx - x).abs() <= half_w && (cy - y).abs() <= half_h;
+                if inside(px, py) || inside(lx, ly) {
+                    // A fragment keeps the track alive without voting.
+                    track.last_support = now;
+                    used_detections[di] = true;
+                    break;
+                }
+            }
+            // Some digits of an enlarged number, still at about its size, are
+            // a sighting of that number and not of the one underneath.
+            for track in self.active_tracks.iter_mut().filter(|t| t.twin) {
+                let ratio = d.height as f32 / track.last.height as f32;
+                let (lx, ly) = center(&track.last);
+                if track.last.element == d.element
+                    && track.last_frame < frame
+                    && digits_contain(track.first.value, d.value)
+                    && (0.5..=1.2).contains(&ratio)
+                    && (cx - lx).abs() <= track.last.width as f32 * 0.75
+                    && (cy - ly).abs() <= track.last.height as f32 * 0.75
+                {
+                    track.partial_frames += 1;
+                    track.last_frame = frame;
+                    track.last_support = now;
+                    used_detections[di] = true;
+                }
+            }
+        }
+
         // Global greedy assignment: a track and detection can each be used only once.
         let mut pairs = Vec::new();
         for (ti, track) in self.active_tracks.iter().enumerate() {
@@ -411,11 +598,11 @@ impl HitTracker {
             let gap = since_seen.as_secs_f32();
             let (px, py) = track.predicted_center(now);
             for (di, d) in valid.iter().enumerate() {
-                if d.element != track.last.element {
+                if used_detections[di] || d.element != track.last.element {
                     continue;
                 }
-                // A shorter reading inside a known number is a fragment; it
-                // must not shrink the track's box. Handled below.
+                // A shorter reading of this number found elsewhere is not
+                // evidence for it either.
                 if digits_contain(known[ti], d.value) {
                     continue;
                 }
@@ -423,6 +610,27 @@ impl HitTracker {
                 // Consecutive hits of one attack often differ by a digit or
                 // two, so near-equal values are no evidence of identity.
                 let same = d.value == track.last.value || d.value == known[ti];
+                if same && track.outgrown_by(d) {
+                    continue;
+                }
+                // A twin only witnesses another instance of its own value.
+                if !same && track.twin {
+                    continue;
+                }
+                if !same && locked[ti] && !digits_related(known[ti], d.value) {
+                    // Junk glued to this number, or several digits misread,
+                    // still sits on the number's own spot. A neighbor is
+                    // offset by a good part of the number's size.
+                    let (dx, dy) = center(d);
+                    let (lx, ly) = center(&track.last);
+                    let off_x = (dx - px).abs().min((dx - lx).abs());
+                    let off_y = (dy - py).abs().min((dy - ly).abs());
+                    if off_x > track.last.width as f32 * 0.6
+                        || off_y > track.last.height as f32 * 0.6
+                    {
+                        continue;
+                    }
+                }
                 // A lingering track only guards against its own number, and
                 // only while that number could still be on screen.
                 if since_seen > TRACK_GAP
@@ -473,8 +681,6 @@ impl HitTracker {
             }
         }
         pairs.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-        let mut used_tracks = vec![false; self.active_tracks.len()];
-        let mut used_detections = vec![false; valid.len()];
         for (_, ti, di) in pairs {
             if used_tracks[ti] || used_detections[di] {
                 continue;
@@ -511,7 +717,7 @@ impl HitTracker {
                     used_detections[di] = true;
                     break;
                 }
-                if digits_contain(d.value, known) && !used_tracks[ti] {
+                if digits_contain(d.value, known) && !used_tracks[ti] && !track.twin {
                     used_tracks[ti] = true;
                     used_detections[di] = true;
                     track.observe(*d, now, scale, frame);
@@ -523,9 +729,32 @@ impl HitTracker {
 
         self.collect(&mut confirmed);
         for (di, d) in valid.into_iter().enumerate() {
-            if !used_detections[di] {
-                self.active_tracks.push(TrackedHit::new(d, now, frame));
+            if used_detections[di] {
+                continue;
             }
+            // Enlarged, and across a settled number that reads the same.
+            let twin = d.value >= 1000
+                && self.active_tracks.iter().zip(&known).zip(&locked).any(
+                    |((t, &value), &locked)| {
+                        let (cx, cy) = center(&d);
+                        let (tx, ty) = center(&t.last);
+                        t.last.element == d.element
+                            && value == d.value
+                            && (locked || t.emitted_value == Some(value))
+                            && t.outgrown_by(&d)
+                            && (cx - tx).abs() <= (d.width + t.last.width) as f32 * 0.5
+                            && (cy - ty).abs() <= (d.height + t.last.height) as f32 * 0.5
+                    },
+                );
+            let mut track = TrackedHit::new(d, now, frame);
+            track.twin = twin;
+            if self.trace && twin {
+                eprintln!(
+                    "[twin] {} {:?} at ({},{}) height {}",
+                    d.value, d.element, d.x, d.y, d.height
+                );
+            }
+            self.active_tracks.push(track);
         }
         confirmed
     }
@@ -594,6 +823,125 @@ mod tests {
         assert_eq!(hits.len(), 1);
         hits.extend(tracker.advance_time(at(start, 5000)));
         assert_eq!(hits[0].value, 14229);
+    }
+
+    /// A Lunar-Bloom reading as recorded: `width` wide, `height` tall.
+    fn bloom(value: u32, x: i32, y: i32, width: u32, height: u32) -> Detection {
+        Detection {
+            element: ElementType::Dendro,
+            width,
+            height,
+            ..detection(value, x, y)
+        }
+    }
+
+    /// The first of two equal hits, read while it settles and floats up.
+    fn settle_first_hit(tracker: &mut HitTracker, start: Instant) -> Vec<ConfirmedHit> {
+        let mut hits = Vec::new();
+        for i in 0..8 {
+            hits.extend(tracker.update_at(
+                &[bloom(29274, 745, 371 - i, 180, 45)],
+                1.5,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits
+    }
+
+    #[test]
+    fn equal_number_popping_in_over_a_settled_one_is_a_second_hit() {
+        // Measured: the third 29274 of a triple hit pops in on top of the
+        // first, 168 px tall over 45 px. It is read whole in one frame, as
+        // "29" in the next, and then wall ornaments cross it for good.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = settle_first_hit(&mut tracker, start);
+        hits.extend(tracker.update_at(&[bloom(29274, 833, 313, 650, 168)], 1.5, at(start, 300)));
+        hits.extend(tracker.update_at(&[bloom(29, 673, 332, 180, 118)], 1.5, at(start, 333)));
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        let values: Vec<u32> = hits.iter().map(|h| h.value).collect();
+        assert_eq!(values, [29274, 29274]);
+    }
+
+    #[test]
+    fn enlarged_reading_seen_in_one_frame_only_is_not_a_hit() {
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = settle_first_hit(&mut tracker, start);
+        hits.extend(tracker.update_at(&[bloom(29274, 833, 313, 650, 168)], 1.5, at(start, 300)));
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn enlarged_twin_is_not_taken_over_by_another_number() {
+        // The next number pops in across the twin before it has shrunk: a
+        // 1210661 was paired with the single enlarged reading of a 29274.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = settle_first_hit(&mut tracker, start);
+        hits.extend(tracker.update_at(&[bloom(29274, 833, 313, 650, 168)], 1.5, at(start, 300)));
+        hits.extend(tracker.update_at(&[bloom(29, 673, 332, 180, 118)], 1.5, at(start, 333)));
+        hits.extend(tracker.update_at(&[bloom(1210661, 930, 400, 570, 160)], 1.5, at(start, 600)));
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        let values: Vec<u32> = hits.iter().map(|h| h.value).collect();
+        assert_eq!(values, [29274, 29274]);
+    }
+
+    #[test]
+    fn number_first_seen_enlarged_is_not_a_return_of_an_equal_one() {
+        // A 4409 is counted and fades. A second 4409 pops in a second later,
+        // first read at more than twice the size the old one ended with.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for i in 0..6 {
+            hits.extend(tracker.update_at(
+                &[bloom(4409, 820 - i * 3, 318, 86, 26)],
+                1.5,
+                at(start, i as u64 * 33),
+            ));
+        }
+        for (i, height) in [57u32, 40, 30, 26, 26, 26, 26].into_iter().enumerate() {
+            hits.extend(tracker.update_at(
+                &[bloom(4409, 771 - i as i32 * 4, 296, height * 3, height)],
+                1.5,
+                at(start, 1400 + i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 6000)));
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn number_returning_at_its_own_size_is_still_one_hit() {
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for ms in [0u64, 33, 66, 100, 133, 166, 1000, 1033, 1066, 1100] {
+            let y = 318 - (ms / 33) as i32;
+            hits.extend(tracker.update_at(&[bloom(4409, 820, y, 86, 26)], 1.5, at(start, ms)));
+        }
+        hits.extend(tracker.advance_time(at(start, 6000)));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn one_reading_with_its_lower_part_cut_off_is_not_growth() {
+        // Lunar-Bloom digits lose their white end in some frames. The whole
+        // reading that follows is the same number, not one popping in.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for (i, height) in [45u32, 45, 45, 28, 45, 45, 45, 45].into_iter().enumerate() {
+            hits.extend(tracker.update_at(
+                &[bloom(29274, 745, 371 - i as i32, 180, height)],
+                1.5,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
@@ -739,6 +1087,109 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_numbers_do_not_trade_fragments() {
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        // Both drift down with the camera.
+        let a =
+            |value: u32, step: u64, width: u32| sized(value, 1094, 590 + step as i32 * 3, width);
+        let b =
+            |value: u32, step: u64, width: u32| sized(value, 1060, 636 + step as i32 * 3, width);
+        for i in 0..3 {
+            hits.extend(tracker.update_at(
+                &[a(104702, i, 180), b(112721, i, 180)],
+                1.0,
+                at(start, i * 33),
+            ));
+        }
+        // Each hides part of the other for a frame.
+        hits.extend(tracker.update_at(&[a(4702, 3, 120), b(12721, 3, 150)], 1.0, at(start, 99)));
+        for i in 4..12 {
+            hits.extend(tracker.update_at(
+                &[a(104702, i, 180), b(112721, i, 180)],
+                1.0,
+                at(start, i * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        hits.sort_by_key(|h| h.value);
+        assert_eq!(
+            hits.iter().map(|h| h.value).collect::<Vec<_>>(),
+            [104702, 112721]
+        );
+    }
+
+    #[test]
+    fn brief_burst_hit_counts_at_low_frame_rates() {
+        // Four readings at 30 fps, then the next number covers it.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for i in 0..4 {
+            hits.extend(tracker.update_at(
+                &[detection(1341, 940, 520 + i * 4)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert_eq!(hits.iter().map(|h| h.value).collect::<Vec<_>>(), [1341]);
+
+        // A long number that came into view digit by digit, read whole twice.
+        let mut tracker = HitTracker::new();
+        let mut hits = Vec::new();
+        for (i, value) in [254, 2848, 25480, 25480].into_iter().enumerate() {
+            hits.extend(tracker.update_at(
+                &[detection(value, 1010, 660 + i as i32 * 4)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert_eq!(hits.iter().map(|h| h.value).collect::<Vec<_>>(), [25480]);
+
+        // Two frames are still too little.
+        let mut tracker = HitTracker::new();
+        let mut hits = Vec::new();
+        for i in 0..2 {
+            hits.extend(tracker.update_at(
+                &[detection(28727, 1010, 560 + i * 4)],
+                1.0,
+                at(start, i as u64 * 17),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn neighbor_in_a_pile_is_not_voted_into_a_known_number() {
+        // 351 is read a few times, vanishes under the pile, and a 384 thirty
+        // pixels away becomes readable. Two hits, not one "381".
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for i in 0..5 {
+            hits.extend(tracker.update_at(
+                &[detection(351, 955, 716 - i * 2)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        for i in 5..14 {
+            hits.extend(tracker.update_at(
+                &[detection(384, 909, 680 - i * 2)],
+                1.0,
+                at(start, i as u64 * 33),
+            ));
+        }
+        hits.extend(tracker.advance_time(at(start, 5000)));
+        hits.sort_by_key(|h| h.value);
+        assert_eq!(hits.iter().map(|h| h.value).collect::<Vec<_>>(), [351, 384]);
+    }
+
+    #[test]
     fn identical_simultaneous_hits_are_counted_separately() {
         let mut tracker = HitTracker::new();
         let start = Instant::now();
@@ -801,6 +1252,35 @@ mod tests {
             .advance_time(start + Duration::from_secs(2))
             .is_empty());
         assert!(tracker.active_tracks.is_empty());
+    }
+
+    #[test]
+    fn number_covered_while_it_floats_is_confirmed() {
+        // Recorded at 1080p: a 7715 floats up a pixel per frame and is covered
+        // by the next hit after five readings, four pixels from where it began.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for (ms, y) in [(0, 295), (33, 294), (100, 292), (133, 291), (166, 291)] {
+            hits.extend(tracker.update_at(&[detection(7715, 943, y)], 1.5, at(start, ms)));
+        }
+        hits.extend(tracker.advance_time(at(start, 2000)));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].value, 7715);
+    }
+
+    #[test]
+    fn jittering_text_is_not_a_floating_number() {
+        // The same readings with the box hopping back and forth, as HUD text
+        // does when its outline flickers.
+        let mut tracker = HitTracker::new();
+        let start = Instant::now();
+        let mut hits = Vec::new();
+        for (ms, y) in [(0, 295), (33, 292), (100, 295), (133, 291), (166, 294)] {
+            hits.extend(tracker.update_at(&[detection(7715, 943, y)], 1.5, at(start, ms)));
+        }
+        hits.extend(tracker.advance_time(at(start, 2000)));
+        assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]

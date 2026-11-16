@@ -35,8 +35,10 @@ impl BoundingBox {
 pub struct DetectedComponent {
     pub bbox: BoundingBox,
     pub element: ElementType,
-    /// Seed hue keeps same-element text separate from differently colored effects.
-    pub hue: u16,
+    /// Segmentation label of the component's pixels (see `label_pixel`). It is
+    /// finer than the element: it keeps text apart from effects of the same
+    /// element, so components with different labels never belong to one number.
+    pub label: u8,
     pub pixel_count: usize,
     pub mask: Vec<u8>, // Local binary bitmap of the component
 }
@@ -97,6 +99,14 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
     if s <= 8 && v >= 85 {
         return Some(ElementType::Physical);
     }
+    // White text over the warm stone and sand that fill most arenas: the
+    // anti-aliased edge of every stroke is white blended with the floor. With
+    // the strict test alone those pixels are dropped, which thins small digits
+    // until they no longer match. Warm hues only, and still far paler than Geo
+    // (S >= 30) or Pyro (S >= 40) text.
+    if s <= 16 && v >= 85 && (10..=54).contains(&h) {
+        return Some(ElementType::Physical);
+    }
 
     // Electro: Violet / Magenta / Lavender / Pink
     if (245..=341).contains(&h) && s >= 10 && v >= 60 {
@@ -108,15 +118,18 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
         return Some(ElementType::Dendro);
     }
 
-    // Anemo: Turquoise / Mint
-    if (156..=175).contains(&h) && s >= 18 && v >= 60 {
+    // Anemo: Turquoise / Mint (text hue is about 160).
+    // The border with Cryo (text hue about 180) sits midway between the two.
+    // At 175 it cut straight through Cryo glyphs whose edge pixels blend with
+    // a warm background, splitting each digit into two elements.
+    if (156..=167).contains(&h) && s >= 18 && v >= 60 {
         return Some(ElementType::Anemo);
     }
 
     // Cryo vs Hydro:
     // Cryo is pale icy cyan with low saturation (S <= 50%).
     // Hydro is saturated ocean blue (S > 50% in 193..=205, or any S >= 18 in 206..=244).
-    if (176..=205).contains(&h) && s >= 12 && s <= 50 && v >= 65 {
+    if (168..=205).contains(&h) && s >= 12 && s <= 50 && v >= 65 {
         return Some(ElementType::Cryo);
     }
     if ((193..=205).contains(&h) && s > 50 && v >= 60)
@@ -146,6 +159,12 @@ pub fn classify_element(r: u8, g: u8, b: u8) -> Option<ElementType> {
     None
 }
 
+/// Dendro text is fully saturated green (about RGB 0,202,80). The glow that
+/// Lunar-Bloom, Lauma's field and other Dendro effects lay over the fight is the
+/// same hue but pale (saturation 20-45 %). Anti-aliased text edges fall in
+/// between; 60 % keeps the glyph body and leaves the glow out.
+const DENDRO_TEXT_SATURATION: u8 = 60;
+
 const ELEMENTS: [ElementType; 8] = [
     ElementType::Pyro,
     ElementType::Hydro,
@@ -157,14 +176,52 @@ const ELEMENTS: [ElementType; 8] = [
     ElementType::Physical,
 ];
 
-/// Per-pixel segmentation label: 0 for background, otherwise the element plus
-/// one bit that splits Pyro (orange text vs. red effects) and Electro (purple
-/// text vs. reddish scenery). Two pixels belong together iff labels are equal.
+/// Label of Lunar-Bloom damage text, one past the labels of `ELEMENTS`.
+pub const LUNAR_BLOOM_LABEL: u8 = 1 + ((ELEMENTS.len() as u8) << 1);
+
+/// Tallest glyph accepted, in pixels at 720p. A number pops in several times
+/// its final size and shrinks within a few frames. For most text the frames
+/// after that are enough. Lunar-Bloom hits land as two or three equal numbers
+/// on one spot, where each is whole only while it is still enlarged on top of
+/// the others, so those are read at up to about 3.5 times their final size.
+fn max_glyph_height(label: u8) -> f32 {
+    if label == LUNAR_BLOOM_LABEL {
+        150.0
+    } else {
+        110.0
+    }
+}
+
+/// Lean of Lunar-Bloom digits: pixels to the right per pixel up.
+const LUNAR_SLANT: f32 = 0.27;
+
+/// Lunar-Bloom numbers are not drawn like other damage text. Each digit is a
+/// gradient at full brightness, from pale green at the top (about RGB
+/// 185,253,180: saturation 30 %) to almost white at the bottom (250,253,239:
+/// saturation 5 %), inside a dark green outline, and the digits lean right.
+/// The element classes cut such a digit into Dendro, nothing and Physical, so
+/// the green part of the gradient gets a label of its own. Saturation of 8 %
+/// and less stays Physical: white text over green scenery is tinted that much,
+/// and taking those pixels broke up white numbers. The white end of a digit is
+/// attached again in `lunar_glyph_mask`.
 #[inline(always)]
-fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
+fn is_lunar_bloom_text(r: u8, g: u8, b: u8) -> bool {
+    let (h, s, v) = rgb_to_hsv(r, g, b);
+    v >= 88 && (60..=150).contains(&h) && (9..=45).contains(&s)
+}
+
+/// Per-pixel segmentation label: 0 for background, otherwise the element plus
+/// one bit that splits Pyro (orange text vs. red effects), Electro (purple
+/// text vs. reddish scenery) and Dendro (saturated text vs. pale glow), or
+/// `LUNAR_BLOOM_LABEL`. Two pixels belong together iff labels are equal.
+#[inline(always)]
+pub fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
     // Same cut as `v < 58` in classify_element, without the float work.
     if r.max(g).max(b) <= 147 {
         return 0;
+    }
+    if is_lunar_bloom_text(r, g, b) {
+        return LUNAR_BLOOM_LABEL;
     }
     let Some(element) = classify_element(r, g, b) else {
         return 0;
@@ -172,6 +229,7 @@ fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
     let split = match element {
         ElementType::Pyro => (23..=42).contains(&rgb_to_hsv(r, g, b).0),
         ElementType::Electro => rgb_to_hsv(r, g, b).0 <= 305,
+        ElementType::Dendro => rgb_to_hsv(r, g, b).1 >= DENDRO_TEXT_SATURATION,
         _ => false,
     };
     let index = ELEMENTS.iter().position(|&e| e == element).unwrap_or(0) as u8;
@@ -179,7 +237,246 @@ fn label_pixel(r: u8, g: u8, b: u8) -> u8 {
 }
 
 fn element_of_label(label: u8) -> Option<ElementType> {
+    if label == LUNAR_BLOOM_LABEL {
+        // Lunar-Bloom damage is Dendro damage.
+        return Some(ElementType::Dendro);
+    }
     ELEMENTS.get((label.checked_sub(1)? >> 1) as usize).copied()
+}
+
+/// Cut one Lunar-Bloom glyph out of the frame.
+///
+/// The lower third of a digit fades to white, which is Physical by color, so
+/// the labeled component is only the upper part. Starting from that part,
+/// collect the Lunar-Bloom and white pixels connected to it, inside a window
+/// that reaches below the component by 0.7 of its height (and left by the
+/// lean that goes with it). Connectivity also keeps leaning neighbors, whose boxes
+/// overlap this one, out of the mask. Returns the box origin, size and mask.
+fn lunar_glyph_mask(
+    labels: &[u8],
+    w: usize,
+    h: usize,
+    first: &Run,
+    extent: &Extent,
+) -> (usize, usize, usize, usize, Vec<u8>) {
+    let physical = 1 + ((ELEMENTS.len() as u8 - 1) << 1);
+    debug_assert_eq!(element_of_label(physical), Some(ElementType::Physical));
+    let comp_h = (extent.max_y - extent.min_y + 1) as usize;
+    let below = (comp_h * 7).div_ceil(10);
+    let x0 = (extent.min_x as usize).saturating_sub((LUNAR_SLANT * below as f32) as usize + 3);
+    let x1 = (extent.max_x as usize + 3).min(w - 1);
+    let y0 = extent.min_y as usize;
+    let y1 = (extent.max_y as usize + below).min(h - 1);
+    let (ww, wh) = (x1 - x0 + 1, y1 - y0 + 1);
+
+    let mut seen = vec![0u8; ww * wh];
+    let start = (first.y as usize - y0) * ww + first.x0 as usize - x0;
+    seen[start] = 255;
+    let mut stack = vec![start];
+    let (mut lo_x, mut hi_x, mut hi_y) = (ww, 0, 0);
+    while let Some(p) = stack.pop() {
+        let (x, y) = (p % ww, p / ww);
+        lo_x = lo_x.min(x);
+        hi_x = hi_x.max(x);
+        hi_y = hi_y.max(y);
+        let mut visit = |nx: usize, ny: usize| {
+            let label = labels[(y0 + ny) * w + x0 + nx];
+            let q = ny * ww + nx;
+            if seen[q] == 0 && (label == LUNAR_BLOOM_LABEL || label == physical) {
+                seen[q] = 255;
+                stack.push(q);
+            }
+        };
+        if x > 0 {
+            visit(x - 1, y);
+        }
+        if x + 1 < ww {
+            visit(x + 1, y);
+        }
+        if y > 0 {
+            visit(x, y - 1);
+        }
+        if y + 1 < wh {
+            visit(x, y + 1);
+        }
+    }
+
+    let (out_w, out_h) = (hi_x - lo_x + 1, hi_y + 1);
+    let mut mask = vec![0u8; out_w * out_h];
+    for (y, out) in mask.chunks_exact_mut(out_w).enumerate() {
+        out.copy_from_slice(&seen[y * ww + lo_x..=y * ww + hi_x]);
+    }
+    (x0 + lo_x, y0, out_w, out_h, mask)
+}
+
+/// Straighten a right-leaning glyph mask: every row moves right in proportion
+/// to its distance from the top, then empty columns are cut off. Returns the
+/// mask, its width, and where its left edge lies relative to the old one when
+/// the bottom row stays in place.
+fn deskew(mask: &[u8], w: usize, h: usize, slant: f32) -> (Vec<u8>, usize, i64) {
+    let shift = |y: usize| (slant * y as f32).round() as usize;
+    let wide = w + shift(h - 1);
+    let (mut lo, mut hi) = (wide, 0);
+    for (y, row) in mask.chunks_exact(w).enumerate() {
+        for (x, _) in row.iter().enumerate().filter(|(_, &m)| m > 0) {
+            lo = lo.min(x + shift(y));
+            hi = hi.max(x + shift(y));
+        }
+    }
+    if lo > hi {
+        return (mask.to_vec(), w, 0);
+    }
+    let out_w = hi - lo + 1;
+    let mut out = vec![0u8; out_w * h];
+    for (y, row) in mask.chunks_exact(w).enumerate() {
+        for (x, _) in row.iter().enumerate().filter(|(_, &m)| m > 0) {
+            out[y * out_w + x + shift(y) - lo] = 255;
+        }
+    }
+    (out, out_w, lo as i64 - shift(h - 1) as i64)
+}
+
+/// Threads used to label a frame, the calling one included. Four at most,
+/// and never more than half the logical cores: next to a game and a recorder that keep every core busy,
+/// more threads only wait for each other. Measured with all cores loaded,
+/// eight workers took about twice as long per frame as four. `GDL_WORKERS`
+/// overrides the choice for experiments.
+fn label_workers() -> usize {
+    static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        std::env::var("GDL_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(|| {
+                let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+                (cores / 2).clamp(1, 4)
+            })
+    })
+}
+
+/// Threads that help label a frame and stay alive between frames.
+///
+/// Starting threads for every frame looked free on an idle machine. Next to a
+/// recorder encoding video on every core, a new thread waited about 13 ms
+/// before it first ran, while the labeling itself took 3 ms per thread: 20 ms
+/// of a 30 ms frame were spent waiting for threads to start. A sleeping thread
+/// is woken much sooner, and `run` never waits for one that is not: the caller
+/// works through the task itself and withdraws the request from every helper
+/// that has not begun.
+struct Helpers {
+    senders: Vec<parking_lot::Mutex<std::sync::mpsc::Sender<Request>>>,
+}
+
+/// One helper's invitation to a task.
+struct Request {
+    task: TaskRef,
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    caller: std::thread::Thread,
+}
+
+/// A borrowed task whose lifetime is vouched for by `Helpers::run`.
+struct TaskRef(*const (dyn Fn() + Sync));
+// SAFETY: the closure is `Sync`, and `run` keeps it alive while any helper
+// may still call it.
+unsafe impl Send for TaskRef {}
+
+const OFFERED: u8 = 0;
+const TAKEN: u8 = 1;
+const FINISHED: u8 = 2;
+const WITHDRAWN: u8 = 3;
+
+impl Helpers {
+    fn new(count: usize) -> Self {
+        let senders = (0..count)
+            .map(|_| {
+                let (sender, receiver) = std::sync::mpsc::channel::<Request>();
+                std::thread::spawn(move || {
+                    use std::sync::atomic::Ordering::SeqCst;
+                    while let Ok(request) = receiver.recv() {
+                        if request
+                            .state
+                            .compare_exchange(OFFERED, TAKEN, SeqCst, SeqCst)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        // Report the end even if the task panics: the caller
+                        // is waiting for it before it lets go of the task.
+                        struct Finish<'a>(&'a Request);
+                        impl Drop for Finish<'_> {
+                            fn drop(&mut self) {
+                                self.0.state.store(FINISHED, SeqCst);
+                                self.0.caller.unpark();
+                            }
+                        }
+                        let finish = Finish(&request);
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                // SAFETY: the state is TAKEN, so `run` does not
+                                // return, and the task stays borrowed, until this
+                                // helper stores FINISHED.
+                                unsafe { (*request.task.0)() }
+                            }));
+                        drop(finish);
+                        if outcome.is_err() {
+                            eprintln!("[Vision] a labeling helper panicked");
+                        }
+                    }
+                });
+                parking_lot::Mutex::new(sender)
+            })
+            .collect();
+        Self { senders }
+    }
+
+    /// Run `task` on the calling thread and on every helper that wakes up in
+    /// time. `task` must work through a shared queue until it is empty, so
+    /// that it does not matter how many threads run it. Returns when no
+    /// thread is inside `task` any more.
+    fn run(&self, task: &(dyn Fn() + Sync)) {
+        use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
+        /// Withdraws the invitations and waits for helpers inside the task,
+        /// also when the caller's own run of it panics.
+        struct Settle(Vec<std::sync::Arc<AtomicU8>>);
+        impl Drop for Settle {
+            fn drop(&mut self) {
+                for state in &self.0 {
+                    if state
+                        .compare_exchange(OFFERED, WITHDRAWN, SeqCst, SeqCst)
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    while state.load(SeqCst) != FINISHED {
+                        std::thread::park_timeout(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
+        }
+        // SAFETY of the lifetime change: `Settle` runs before `task` goes out
+        // of scope, and after it no helper holds or will use the pointer.
+        let erased: *const (dyn Fn() + Sync) = unsafe { std::mem::transmute(task) };
+        let mut settle = Settle(Vec::with_capacity(self.senders.len()));
+        for sender in &self.senders {
+            let state = std::sync::Arc::new(AtomicU8::new(OFFERED));
+            let request = Request {
+                task: TaskRef(erased),
+                state: state.clone(),
+                caller: std::thread::current(),
+            };
+            if sender.lock().send(request).is_ok() {
+                settle.0.push(state);
+            }
+        }
+        task();
+        drop(settle);
+    }
+}
+
+fn helpers() -> &'static Helpers {
+    static HELPERS: std::sync::OnceLock<Helpers> = std::sync::OnceLock::new();
+    HELPERS.get_or_init(|| Helpers::new(label_workers() - 1))
 }
 
 /// A maximal horizontal stretch of equally labeled pixels.
@@ -193,15 +490,42 @@ struct Run {
     seeded: bool,
 }
 
+/// How one frame's segmentation went, for the live diagnostics.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SegmentStats {
+    /// Labeling the pixels, or taking over the labels that came with the
+    /// frame, and cutting the rows into runs.
+    pub label: std::time::Duration,
+    /// Connected components and glyph masks.
+    pub components: std::time::Duration,
+    /// Row bands of the labeling step done by the calling thread.
+    pub bands_caller: u32,
+    /// Row bands done by helper threads that woke up in time.
+    pub bands_helpers: u32,
+    /// The labels came with the frame, computed on the graphics card.
+    pub gpu_labels: bool,
+}
+
 /// Classify every pixel once, across cores, and collect the row runs that
 /// connected-component labeling works on. Everything downstream compares
 /// bytes or whole runs instead of re-deriving colors per pixel.
-fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
+///
+/// A frame that brings its labels along (see `RawFrame::labels`) skips the
+/// classification: its label rows are copied instead. Everything after that
+/// one step is the same code for both sources, so equal labels give equal
+/// results.
+fn label_frame(
+    frame: &RawFrame,
+    zones: &HudZones,
+    stats: &mut SegmentStats,
+) -> (Vec<u8>, Vec<Run>) {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let stride = frame.stride;
     let data = &frame.data;
     let table = label_table();
+    let supplied = frame.labels.as_deref().filter(|l| l.len() == w * h);
+    stats.gpu_labels = supplied.is_some();
 
     // Dynamic combat viewport boundaries
     let y_min = (h as f32 * 0.08) as usize; // Exclude top status/header
@@ -209,100 +533,230 @@ fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
     let x_min = (w as f32 * 0.06) as usize;
     let x_max = (w as f32 * 0.94) as usize;
 
+    // The skill zone is everything right of one column.
+    let skill_from = zones
+        .columns
+        .iter()
+        .position(|c| c & SKILL_ZONE != 0)
+        .unwrap_or(w);
+
     let mut labels = vec![0u8; w * h];
-    let workers = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 8);
-    let band = h.div_ceil(workers).max(1);
-    let mut runs = Vec::new();
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = labels
-            .chunks_mut(band * w)
-            .enumerate()
-            .map(|(bi, chunk)| {
-                scope.spawn(move || {
-                    let mut runs: Vec<Run> = Vec::with_capacity(4096);
-                    for (ry, row) in chunk.chunks_exact_mut(w).enumerate() {
-                        let y = bi * band + ry;
-                        let start = y * stride;
-                        let pixels = &data[start..start + w * 4];
-                        let zy = zones.rows[y];
-                        let skill_row = zy & SKILL_ZONE != 0;
-                        // The coarse scan only looks at even rows and columns.
-                        let scan_row = y % 2 == 0 && (y_min..y_max).contains(&y);
-                        let mut open: Option<Run> = None;
-                        for (x, (label, px)) in
-                            row.iter_mut().zip(pixels.chunks_exact(4)).enumerate()
-                        {
-                            // BGRA format from DXGI
-                            let mut value = table[usize::from(px[2]) << 16
-                                | usize::from(px[1]) << 8
-                                | usize::from(px[0])];
-                            // Skill icons and cooldown digits are a wall.
-                            if skill_row && zones.columns[x] & SKILL_ZONE != 0 {
-                                value = 0;
-                            }
-                            *label = value;
-                            if let Some(run) = &mut open {
-                                if run.label == value {
-                                    continue;
-                                }
-                                run.x1 = x as u32;
-                                runs.extend(open.take());
-                            }
-                            if value != 0 {
-                                open = Some(Run {
-                                    x0: x as u32,
-                                    x1: w as u32,
-                                    y: y as u32,
-                                    label: value,
-                                    seeded: false,
-                                });
-                            }
-                        }
-                        runs.extend(open.take());
-                        if scan_row {
-                            for run in runs.iter_mut().rev().take_while(|r| r.y == y as u32) {
-                                let from = (run.x0 as usize).max(x_min).next_multiple_of(2);
-                                let to = (run.x1 as usize).min(x_max);
-                                run.seeded =
-                                    (from..to).step_by(2).any(|x| zones.columns[x] & zy == 0);
-                            }
-                        }
+    // Rows far above or below the combat viewport cannot hold an accepted
+    // component: anything reaching past the 8 % / 91 % lines is rejected. One
+    // row beyond each line is kept so such a component is still seen crossing.
+    let row_lo = ((h as f32 * 0.08).ceil() as usize).saturating_sub(1);
+    let row_hi = ((h as f32 * 0.91) as usize + 2).min(h);
+    // Several bands per thread: the calling thread takes the next band
+    // whenever it is free, so a helper that is slow to wake costs nothing.
+    let band = (row_hi - row_lo).div_ceil(label_workers() * 4).max(1);
+    let label_band = |bi: usize, chunk: &mut [u8]| {
+        let mut runs: Vec<Run> = Vec::with_capacity(4096);
+        for (ry, row) in chunk.chunks_exact_mut(w).enumerate() {
+            let y = row_lo + bi * band + ry;
+            let start = y * stride;
+            let pixels = &data[start..start + w * 4];
+            let zy = zones.rows[y];
+            let skill_row = zy & SKILL_ZONE != 0;
+            // The coarse scan only looks at even rows and columns.
+            let scan_row = y % 2 == 0 && (y_min..y_max).contains(&y);
+            // Two tight passes: classify the row, then cut it into runs.
+            // Mixing them kept the compiler from producing a simple loop for
+            // either.
+            match supplied {
+                Some(labels) => row.copy_from_slice(&labels[y * w..(y + 1) * w]),
+                None => {
+                    for (label, px) in row.iter_mut().zip(pixels.chunks_exact(4)) {
+                        // BGRA format from DXGI
+                        *label = table.label(px[2], px[1], px[0]);
                     }
-                    runs
-                })
-            })
-            .collect();
-        for handle in handles {
-            runs.extend(handle.join().expect("label worker panicked"));
+                }
+            }
+            // Skill icons and cooldown digits are a wall.
+            if skill_row {
+                row[skill_from..].fill(0);
+            }
+            let mut x = 0;
+            while x < w {
+                // Background comes in long stretches: skip it eight pixels at
+                // a time.
+                if let Some(word) = row.get(x..x + 8) {
+                    if word == [0u8; 8] {
+                        x += 8;
+                        continue;
+                    }
+                }
+                let value = row[x];
+                if value == 0 {
+                    x += 1;
+                    continue;
+                }
+                let x0 = x;
+                while x < w && row[x] == value {
+                    x += 1;
+                }
+                runs.push(Run {
+                    x0: x0 as u32,
+                    x1: x as u32,
+                    y: y as u32,
+                    label: value,
+                    seeded: false,
+                });
+            }
+            if scan_row {
+                for run in runs.iter_mut().rev().take_while(|r| r.y == y as u32) {
+                    let from = (run.x0 as usize).max(x_min).next_multiple_of(2);
+                    let to = (run.x1 as usize).min(x_max);
+                    run.seeded = (from..to).step_by(2).any(|x| zones.columns[x] & zy == 0);
+                }
+            }
+        }
+        runs
+    };
+
+    let bands = parking_lot::Mutex::new(
+        labels[row_lo * w..row_hi * w]
+            .chunks_mut(band * w)
+            .enumerate(),
+    );
+    let done = parking_lot::Mutex::new(Vec::new());
+    let caller = std::thread::current().id();
+    helpers().run(&|| {
+        let own = std::thread::current().id() == caller;
+        loop {
+            // The lock covers only taking the next band, not working on it.
+            let next = bands.lock().next();
+            let Some((bi, chunk)) = next else {
+                break;
+            };
+            let runs = label_band(bi, chunk);
+            done.lock().push((bi, runs, own));
         }
     });
+    drop(bands);
+    let mut done = done.into_inner();
+    let by_caller = done.iter().filter(|part| part.2).count() as u32;
+    stats.bands_caller += by_caller;
+    stats.bands_helpers += done.len() as u32 - by_caller;
+    done.sort_unstable_by_key(|part| part.0);
+    let mut runs = Vec::with_capacity(done.iter().map(|part| part.1.len()).sum());
+    for (_, part, _) in done {
+        runs.extend(part);
+    }
     (labels, runs)
 }
 
-/// Exact label for every 24-bit color, built once. Turns the per-pixel HSV
-/// classification into a single lookup.
-fn label_table() -> &'static [u8] {
-    static TABLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table = vec![0u8; 1 << 24];
+/// Exact label for every 24-bit color, built once, in two levels.
+///
+/// Colors are grouped into 16×16×16 blocks. Most blocks lie wholly inside one
+/// element's color range or wholly outside all of them, and are answered from
+/// a 4096-entry table that stays in the first-level cache. Only blocks that
+/// straddle a boundary keep their 4096 individual labels. A flat 16 MB table
+/// gave the same answers but missed the cache on most pixels.
+struct LabelTable {
+    /// Below `MIXED`: the label of a uniform block. Otherwise `MIXED` plus the
+    /// index of the block's own labels in `mixed`.
+    blocks: Box<[u16; 4096]>,
+    mixed: Vec<u8>,
+}
+
+const MIXED: u16 = 256;
+
+impl LabelTable {
+    #[inline(always)]
+    fn label(&self, r: u8, g: u8, b: u8) -> u8 {
+        // Three 4-bit fields: the index is below 4096 by construction, which
+        // lets the fixed-size table be read without a bounds check.
+        let block =
+            self.blocks[usize::from(r >> 4) << 8 | usize::from(g >> 4) << 4 | usize::from(b >> 4)];
+        if block < MIXED {
+            block as u8
+        } else {
+            self.mixed[usize::from(block - MIXED) << 12
+                | usize::from(r & 15) << 8
+                | usize::from(g & 15) << 4
+                | usize::from(b & 15)]
+        }
+    }
+
+    fn build() -> Self {
+        let block_labels = |block: usize| -> Vec<u8> {
+            let (r, g, b) = (block >> 8 << 4, (block >> 4 & 15) << 4, (block & 15) << 4);
+            (0..4096usize)
+                .map(|i| {
+                    label_pixel(
+                        (r | i >> 8) as u8,
+                        (g | (i >> 4 & 15)) as u8,
+                        (b | (i & 15)) as u8,
+                    )
+                })
+                .collect()
+        };
         let workers = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .clamp(1, 16);
-        let chunk = (1usize << 24).div_ceil(workers);
+        let per_worker = 4096usize.div_ceil(workers);
+        let mut parts: Vec<Vec<Vec<u8>>> = Vec::new();
         std::thread::scope(|scope| {
-            for (ci, part) in table.chunks_mut(chunk).enumerate() {
-                scope.spawn(move || {
-                    for (i, label) in part.iter_mut().enumerate() {
-                        let rgb = ci * chunk + i;
-                        *label = label_pixel((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8);
-                    }
-                });
+            let handles: Vec<_> = (0..workers)
+                .map(|wi| {
+                    scope.spawn(move || {
+                        (wi * per_worker..((wi + 1) * per_worker).min(4096))
+                            .map(block_labels)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for handle in handles {
+                parts.push(handle.join().expect("label table worker panicked"));
             }
         });
-        table
-    })
+        let mut blocks = Box::new([0u16; 4096]);
+        let mut mixed = Vec::new();
+        for (block, labels) in blocks.iter_mut().zip(parts.into_iter().flatten()) {
+            if labels.iter().all(|&l| l == labels[0]) {
+                *block = u16::from(labels[0]);
+            } else {
+                *block = MIXED + (mixed.len() >> 12) as u16;
+                mixed.extend_from_slice(&labels);
+            }
+        }
+        Self { blocks, mixed }
+    }
+}
+
+fn label_table() -> &'static LabelTable {
+    static TABLE: std::sync::OnceLock<LabelTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(LabelTable::build)
+}
+
+/// The label of every 24-bit color as one flat table of 16 MB, indexed by
+/// `r << 16 | g << 8 | b`. The graphics card labels pixels by looking them up
+/// in a copy of this table, so its answers are `label_pixel`'s by construction.
+pub fn flat_label_table() -> Vec<u8> {
+    let table = label_table();
+    let mut flat = vec![0u8; 1 << 24];
+    for (r, plane) in flat.chunks_exact_mut(1 << 16).enumerate() {
+        for (g, row) in plane.chunks_exact_mut(256).enumerate() {
+            for (b, label) in row.iter_mut().enumerate() {
+                *label = table.label(r as u8, g as u8, b as u8);
+            }
+        }
+    }
+    flat
+}
+
+/// Label every pixel of a BGRA image on the processor, rows packed. This is
+/// the reference that labels computed on the graphics card are checked against.
+pub fn label_bgra(data: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
+    let table = label_table();
+    let mut labels = vec![0u8; width * height];
+    for (y, row) in labels.chunks_exact_mut(width.max(1)).enumerate() {
+        let pixels = &data[y * stride..y * stride + width * 4];
+        for (label, px) in row.iter_mut().zip(pixels.chunks_exact(4)) {
+            *label = table.label(px[2], px[1], px[0]);
+        }
+    }
+    labels
 }
 
 #[derive(Clone, Copy)]
@@ -353,6 +807,15 @@ pub struct ColorFilter;
 impl ColorFilter {
     /// Segments candidate text components from a raw frame
     pub fn segment_frame(frame: &RawFrame) -> Vec<DetectedComponent> {
+        Self::segment_frame_timed(frame, &mut SegmentStats::default())
+    }
+
+    /// `segment_frame`, also reporting where the time went.
+    pub fn segment_frame_timed(
+        frame: &RawFrame,
+        stats: &mut SegmentStats,
+    ) -> Vec<DetectedComponent> {
+        let started = std::time::Instant::now();
         let w = frame.width as usize;
         let h = frame.height as usize;
         let stride = frame.stride;
@@ -362,7 +825,8 @@ impl ColorFilter {
 
         let scale = (h as f32 / 720.0).max(1.0);
         let zones = HudZones::new(w, h);
-        let (labels, runs) = label_frame(frame, &zones);
+        let (labels, runs) = label_frame(frame, &zones, stats);
+        stats.label = started.elapsed();
 
         // Connected components over runs: union overlapping same-label runs of
         // adjacent rows (4-connectivity). The smaller index stays the root, so
@@ -419,14 +883,16 @@ impl ColorFilter {
             e.seeded |= run.seeded;
         }
 
-        extents
+        let components = extents
             .iter()
             .enumerate()
             .filter_map(|(root, extent)| {
                 let extent = extent.as_ref().filter(|e| e.seeded)?;
                 Self::build_component(frame, &labels, &runs[root], extent, scale)
             })
-            .collect()
+            .collect();
+        stats.components = started.elapsed() - stats.label;
+        components
     }
 
     /// Calculate ratio of dark pixels immediately surrounding a bounding box
@@ -513,20 +979,13 @@ impl ColorFilter {
     ) -> Option<DetectedComponent> {
         let w = frame.width as usize;
         let h = frame.height as usize;
-        let data = &frame.data;
 
         // Damage text can share its element with an enormous attack effect.
-        // The label also separates orange text from red effects within Pyro and
-        // purple text from reddish scenery within Electro.
+        // The label also separates orange text from red effects within Pyro,
+        // purple text from reddish scenery within Electro and saturated text
+        // from pale glow within Dendro.
         let seed = first.label;
         let target_elem = element_of_label(seed)?;
-        let seed_offset = first.y as usize * frame.stride + first.x0 as usize * 4;
-        let seed_hue = rgb_to_hsv(
-            data[seed_offset + 2],
-            data[seed_offset + 1],
-            data[seed_offset],
-        )
-        .0;
 
         // Large background planes and effects are not text.
         // Text grows briefly on impact; area scales in two dimensions.
@@ -547,7 +1006,7 @@ impl ColorFilter {
 
         // Height filter scaled by viewport resolution: supports 720p through 4K
         let min_glyph_h = (12.0 * scale) as u32;
-        let max_glyph_h = (110.0 * scale) as u32;
+        let max_glyph_h = (max_glyph_height(seed) * scale) as u32;
         if comp_h < min_glyph_h || comp_h > max_glyph_h {
             return None;
         }
@@ -590,6 +1049,26 @@ impl ColorFilter {
             return None;
         }
 
+        // Lunar-Bloom digits are completed by their white lower part and
+        // straightened: everything downstream expects whole, upright digits.
+        if seed == LUNAR_BLOOM_LABEL {
+            let (x, y, gw, gh, mask) = lunar_glyph_mask(labels, w, h, first, extent);
+            let pixel_count = mask.iter().filter(|&&m| m > 0).count();
+            let (mask, gw, dx) = deskew(&mask, gw, gh, LUNAR_SLANT);
+            return Some(DetectedComponent {
+                bbox: BoundingBox {
+                    x: (x as i64 + dx).max(0) as u32,
+                    y: y as u32,
+                    width: gw as u32,
+                    height: gh as u32,
+                },
+                element: target_elem,
+                label: seed,
+                pixel_count,
+                mask,
+            });
+        }
+
         Some(DetectedComponent {
             bbox: BoundingBox {
                 x: min_x as u32,
@@ -598,7 +1077,7 @@ impl ColorFilter {
                 height: comp_h,
             },
             element: target_elem,
-            hue: seed_hue,
+            label: seed,
             pixel_count: count,
             mask,
         })
@@ -783,7 +1262,7 @@ impl ColorFilter {
                         height: tight_h,
                     },
                     element: comp.element,
-                    hue: comp.hue,
+                    label: comp.label,
                     pixel_count: sub_pixels,
                     mask: sub_mask,
                 });
@@ -797,6 +1276,76 @@ impl ColorFilter {
         } else {
             result
         }
+    }
+
+    /// Two numbers that end up side by side form one row of glyphs: a 25286
+    /// next to a 95922 was one ten-digit cluster, a 9942 whose neighbor
+    /// covered the gap a seven-digit one. The digits of one number share a
+    /// top line and a baseline, and a second number rarely sits at the same
+    /// height and size. Cut the row where the glyphs on both sides agree
+    /// among themselves and the two sides differ by a clear step. Each side
+    /// keeps at least two glyphs; the caller accepts the cut only if both
+    /// sides read as numbers, so a damaged glyph never shortens a number.
+    pub fn split_row_at_step(
+        cluster: &DamageCluster,
+        scale: f32,
+    ) -> Option<(DamageCluster, DamageCluster)> {
+        let glyphs = &cluster.glyphs;
+        if glyphs.len() < 4 {
+            return None;
+        }
+        let top = |g: &DetectedComponent| g.bbox.y as i32;
+        let bottom = |g: &DetectedComponent| (g.bbox.y + g.bbox.height) as i32;
+        // (smallest, largest, median) of one edge over a run of glyphs.
+        let spread = |part: &[DetectedComponent], edge: &dyn Fn(&DetectedComponent) -> i32| {
+            let mut values: Vec<i32> = part.iter().map(edge).collect();
+            values.sort_unstable();
+            (
+                values[0],
+                values[values.len() - 1],
+                values[values.len() / 2],
+            )
+        };
+        let mut best: Option<(i32, usize)> = None;
+        for cut in 2..=glyphs.len() - 2 {
+            let (left, right) = glyphs.split_at(cut);
+            let height = left
+                .iter()
+                .chain(right)
+                .map(|g| g.bbox.height)
+                .max()
+                .unwrap_or(0) as f32;
+            let needed = (height * 0.12).max(3.0 * scale);
+            for edge in [&top as &dyn Fn(&DetectedComponent) -> i32, &bottom] {
+                let (l_min, l_max, l_mid) = spread(left, edge);
+                let (r_min, r_max, r_mid) = spread(right, edge);
+                let step = (l_mid - r_mid).abs();
+                // The sides must not reach into each other's range either.
+                let apart = (r_min - l_max).max(l_min - r_max);
+                if step as f32 >= needed
+                    && ((l_max - l_min).max(r_max - r_min) as f32) <= step as f32 * 0.4
+                    && apart as f32 >= step as f32 * 0.5
+                    && best.is_none_or(|(s, _)| step > s)
+                {
+                    best = Some((step, cut));
+                }
+            }
+        }
+        let (_, cut) = best?;
+        let part = |glyphs: &[DetectedComponent]| {
+            let bbox = glyphs
+                .iter()
+                .skip(1)
+                .fold(glyphs[0].bbox, |b, g| b.merge(&g.bbox));
+            let crit_height = (27.0 * scale) as u32;
+            DamageCluster {
+                element: cluster.element,
+                bbox,
+                is_crit: glyphs.iter().any(|g| g.bbox.height >= crit_height),
+                glyphs: glyphs.to_vec(),
+            }
+        };
+        Some((part(&glyphs[..cut]), part(&glyphs[cut..])))
     }
 
     /// Check if a component is an exclamation mark '!' (narrow and has vertical gap before dot)
@@ -846,9 +1395,9 @@ impl ColorFilter {
             for s in split {
                 let aspect = s.bbox.width as f32 / s.bbox.height as f32;
                 let min_h = (12.0 * scale) as u32;
-                let max_h = (110.0 * scale) as u32;
+                let max_h = (max_glyph_height(s.label) * scale) as u32;
                 let min_w = (4.0 * scale) as u32;
-                let max_w = (100.0 * scale) as u32;
+                let max_w = (max_glyph_height(s.label) * 0.91 * scale) as u32;
                 let min_px = (8.0 * scale) as usize;
 
                 if s.bbox.height >= min_h
@@ -873,17 +1422,7 @@ impl ColorFilter {
             let mut matched_cluster = None;
             for cluster in raw_clusters.iter_mut() {
                 let last = cluster.last().unwrap();
-                if last.element != c.element {
-                    continue;
-                }
-                if last.element == ElementType::Pyro {
-                    let last_orange = (23..=42).contains(&last.hue);
-                    let current_orange = (23..=42).contains(&c.hue);
-                    if last_orange != current_orange {
-                        continue;
-                    }
-                }
-                if last.element == ElementType::Electro && (last.hue <= 305) != (c.hue <= 305) {
+                if last.label != c.label {
                     continue;
                 }
 
@@ -978,6 +1517,7 @@ mod tests {
             data: vec![170; 32 * 32 * 4],
             screen_x: 0,
             screen_y: 0,
+            labels: None,
         };
         let mask = vec![255; 8 * 16];
         for y in 8..24 {
@@ -1005,6 +1545,148 @@ mod tests {
         assert!(!ColorFilter::has_contrasting_stroke(
             &frame, 8, 8, 8, 16, &mask
         ));
+    }
+
+    #[test]
+    fn dendro_text_is_cut_out_of_pale_green_glow() {
+        // Lunar-Bloom covers the fight in a pale green glow that is Dendro by
+        // hue. Saturated text inside it must stay a component of its own.
+        let (w, h) = (640usize, 360usize);
+        let mut frame = RawFrame {
+            width: w as u32,
+            height: h as u32,
+            stride: w * 4,
+            data: vec![0; w * h * 4],
+            screen_x: 0,
+            screen_y: 0,
+            labels: None,
+        };
+        let mut fill = |x0: usize, y0: usize, bw: usize, bh: usize, rgb: (u8, u8, u8)| {
+            for y in y0..y0 + bh {
+                for x in x0..x0 + bw {
+                    let p = y * w * 4 + x * 4;
+                    frame.data[p..p + 4].copy_from_slice(&[rgb.2, rgb.1, rgb.0, 255]);
+                }
+            }
+        };
+        // Colors measured in Lunar-Bloom footage: glow, then text.
+        assert_eq!(classify_element(150, 214, 184), Some(ElementType::Dendro));
+        assert_eq!(classify_element(0, 202, 80), Some(ElementType::Dendro));
+        fill(200, 120, 240, 120, (150, 214, 184));
+        fill(300, 160, 14, 30, (0, 202, 80));
+        fill(322, 160, 14, 30, (0, 202, 80));
+
+        let text: Vec<_> = ColorFilter::segment_frame(&frame)
+            .into_iter()
+            .filter(|c| c.element == ElementType::Dendro && c.label == label_pixel(0, 202, 80))
+            .map(|c| (c.bbox.x, c.bbox.y, c.bbox.width, c.bbox.height))
+            .collect();
+        assert_eq!(text, [(300, 160, 14, 30), (322, 160, 14, 30)]);
+    }
+
+    #[test]
+    fn lunar_bloom_gradient_gets_its_own_label() {
+        // Top, middle and lower part of a Lunar-Bloom digit as recorded.
+        for (r, g, b) in [(185, 253, 180), (203, 253, 190), (221, 251, 217)] {
+            assert_eq!(label_pixel(r, g, b), LUNAR_BLOOM_LABEL, "{r},{g},{b}");
+        }
+        assert_eq!(
+            element_of_label(LUNAR_BLOOM_LABEL),
+            Some(ElementType::Dendro)
+        );
+        // The white end of the gradient and ordinary text keep their labels.
+        let physical = label_pixel(245, 245, 250);
+        assert_eq!(element_of_label(physical), Some(ElementType::Physical));
+        assert_eq!(label_pixel(250, 253, 239), physical);
+        assert_eq!(label_pixel(249, 255, 240), physical);
+        assert_ne!(label_pixel(0, 202, 80), LUNAR_BLOOM_LABEL);
+        // Glow is too dim to be mistaken for the text.
+        assert_ne!(label_pixel(150, 214, 184), LUNAR_BLOOM_LABEL);
+    }
+
+    #[test]
+    fn lunar_bloom_digit_is_completed_and_straightened() {
+        // A leaning bar, 8 px wide and 40 px tall: green for the upper 28
+        // rows, white below, on a dark background.
+        let (w, h) = (640usize, 360usize);
+        let mut frame = RawFrame {
+            width: w as u32,
+            height: h as u32,
+            stride: w * 4,
+            data: vec![0; w * h * 4],
+            screen_x: 0,
+            screen_y: 0,
+            labels: None,
+        };
+        let draw = |frame: &mut RawFrame, left: usize, top: usize| {
+            for y in 0..40usize {
+                let x0 = left + (LUNAR_SLANT * (39 - y) as f32).round() as usize;
+                let rgb: [u8; 3] = if y < 28 {
+                    [185, 253, 180]
+                } else {
+                    [255, 255, 255]
+                };
+                for x in x0..x0 + 8 {
+                    let p = (top + y) * w * 4 + x * 4;
+                    frame.data[p..p + 4].copy_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+                }
+            }
+        };
+        // Close enough that the leaning boxes overlap.
+        draw(&mut frame, 300, 160);
+        draw(&mut frame, 312, 160);
+
+        let glyphs: Vec<_> = ColorFilter::segment_frame(&frame)
+            .into_iter()
+            .filter(|c| c.label == LUNAR_BLOOM_LABEL)
+            .collect();
+        assert_eq!(glyphs.len(), 2, "the bars stay separate");
+        for (glyph, left) in glyphs.iter().zip([300u32, 312]) {
+            // Whole height including the white end, and upright: about as
+            // wide as the bar itself instead of bar plus lean (18 px). Row
+            // shifts are rounded, which may cost one pixel.
+            assert_eq!((glyph.bbox.y, glyph.bbox.height), (160, 40));
+            assert!((8..=9).contains(&glyph.bbox.width), "{:?}", glyph.bbox);
+            assert!(glyph.bbox.x.abs_diff(left) <= 1, "{:?}", glyph.bbox);
+            assert_eq!(glyph.pixel_count, 8 * 40);
+        }
+    }
+
+    #[test]
+    fn helpers_work_through_a_queue_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        // With or without help, and however late a helper wakes up, every
+        // item is handled once and `run` returns only when all are done.
+        let pool = Helpers::new(3);
+        for round in 0..200 {
+            let items: Vec<AtomicUsize> = (0..64).map(|_| AtomicUsize::new(0)).collect();
+            let next = AtomicUsize::new(0);
+            pool.run(&|| loop {
+                let i = next.fetch_add(1, SeqCst);
+                let Some(item) = items.get(i) else {
+                    break;
+                };
+                item.fetch_add(1, SeqCst);
+            });
+            assert!(
+                items.iter().all(|item| item.load(SeqCst) == 1),
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_table_matches_direct_classification() {
+        let table = label_table();
+        // A coarse sweep plus every value near the brightness cut.
+        for r in (0..=255u8).step_by(3) {
+            for g in (0..=255u8).step_by(5) {
+                for b in (0..=255u8).step_by(7).chain(145..=150) {
+                    assert_eq!(table.label(r, g, b), label_pixel(r, g, b), "{r},{g},{b}");
+                }
+            }
+        }
+        assert!(table.mixed.len() < 8 << 20, "most blocks should be uniform");
     }
 
     #[test]

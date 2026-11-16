@@ -165,6 +165,18 @@ button {
   color: var(--text);
 }
 
+.bar-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px 0 6px;
+  background: var(--hairline);
+}
+
+.close-btn:hover {
+  background: rgba(239, 68, 68, 0.85);
+  color: #fff;
+}
+
 .icon-btn:focus-visible,
 .lock-btn:focus-visible,
 .menu-item:focus-visible {
@@ -177,7 +189,7 @@ button {
   align-items: center;
   gap: 4px;
   height: 26px;
-  margin-left: 4px;
+  margin-left: 6px;
   padding: 0 8px;
   border: 1px solid var(--hairline);
   border-radius: 7px;
@@ -224,6 +236,12 @@ button {
 .menu-item.on::after {
   content: " · on";
   color: var(--ok);
+}
+
+/* Chosen, but this machine cannot do it: the fallback is in use. */
+.menu-item.on.unavailable::after {
+  content: " · not available";
+  color: var(--warn);
 }
 
 /* ── Click-through: nothing is clickable, so say so and get out of the way ── */
@@ -504,6 +522,17 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* While tracking: a summary line and where the reading time went. */
+.foot-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.foot-line + .foot-line {
+  margin-top: 2px;
+  font-size: 10px;
 }
 
 .compact .foot {

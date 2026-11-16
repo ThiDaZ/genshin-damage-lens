@@ -132,6 +132,23 @@ pub const DIGIT_7: [u8; 384] = [
     0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
+/// The game's own 7 as captured: the bar starts at the left edge and the stem
+/// is thicker and ends further right than the generic shape above.
+pub const DIGIT_7_GAME: [u8; 384] = [
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
 pub const DIGIT_8: [u8; 384] = [
     0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0,
     0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0,
@@ -373,6 +390,7 @@ impl DigitTemplates {
         alt_templates[5].push(DIGIT_5_CRIT);
         alt_templates[6].push(DIGIT_6_CRIT);
         alt_templates[6].push(DIGIT_6_CRIT_SLANTED);
+        alt_templates[7].push(DIGIT_7_GAME);
         alt_templates[8].push(DIGIT_8_CRIT);
         alt_templates[9].push(DIGIT_9_CRIT);
         alt_templates[9].push(DIGIT_9_CRIT_SLANTED);
@@ -396,7 +414,27 @@ impl DigitTemplates {
 
     /// Match an arbitrary binary image crop against templates
     pub fn match_glyph(&self, crop: &[u8], cw: usize, ch: usize) -> (u32, f32) {
-        if cw == 0 || ch == 0 || cw.checked_mul(ch).is_none_or(|len| crop.len() < len) {
+        self.match_glyph_region(crop, cw, 0, 0, cw, ch)
+    }
+
+    /// Match the `cw`×`ch` box at (`x0`, `y0`) of a mask whose rows are
+    /// `stride` wide, without copying it out first.
+    pub fn match_glyph_region(
+        &self,
+        mask: &[u8],
+        stride: usize,
+        x0: usize,
+        y0: usize,
+        cw: usize,
+        ch: usize,
+    ) -> (u32, f32) {
+        if cw == 0
+            || ch == 0
+            || x0 + cw > stride
+            || (y0 + ch)
+                .checked_mul(stride)
+                .is_none_or(|len| mask.len() < len)
+        {
             return (0, 0.0);
         }
 
@@ -412,7 +450,7 @@ impl DigitTemplates {
             let sy = (ty * ch) / TEMPLATE_H;
             for tx in 0..TEMPLATE_W {
                 let sx = (tx * cw) / TEMPLATE_W;
-                normalized[ty * TEMPLATE_W + tx] = if crop[sy * cw + sx] > 0 { 1 } else { 0 };
+                normalized[ty * TEMPLATE_W + tx] = u8::from(mask[(y0 + sy) * stride + x0 + sx] > 0);
             }
         }
 
@@ -559,14 +597,7 @@ impl DigitMatcher {
             let mut recovered = None;
             for j in i + 1..comps.len() {
                 let b = &comps[j];
-                if used[j] || a.element != b.element {
-                    continue;
-                }
-                if (a.element == crate::state::ElementType::Pyro
-                    && (23..=42).contains(&a.hue) != (23..=42).contains(&b.hue))
-                    || (a.element == crate::state::ElementType::Electro
-                        && (a.hue <= 305) != (b.hue <= 305))
-                {
+                if used[j] || a.label != b.label {
                     continue;
                 }
                 let bbox = a.bbox.merge(&b.bbox);
@@ -607,7 +638,7 @@ impl DigitMatcher {
                 recovered = Some(DetectedComponent {
                     bbox,
                     element: a.element,
-                    hue: a.hue,
+                    label: a.label,
                     pixel_count: a.pixel_count + b.pixel_count,
                     mask,
                 });
@@ -627,10 +658,19 @@ impl DigitMatcher {
         let templates = shared_templates();
         let w = comp.bbox.width as usize;
         let h = comp.bbox.height as usize;
+        // Per column: pixel count and the first and last set row. Every
+        // candidate segment's tight box follows from these, so the search
+        // below never rescans or copies the mask.
         let mut columns = vec![0usize; w];
-        for row in comp.mask.chunks_exact(w) {
+        let mut top = vec![h; w];
+        let mut bottom = vec![0usize; w];
+        for (y, row) in comp.mask.chunks_exact(w).enumerate() {
             for (x, &p) in row.iter().enumerate() {
-                columns[x] += usize::from(p > 0);
+                if p > 0 {
+                    columns[x] += 1;
+                    top[x] = top[x].min(y);
+                    bottom[x] = y;
+                }
             }
         }
         let min_w = (h as f32 * 0.18).ceil() as usize;
@@ -656,7 +696,8 @@ impl DigitMatcher {
             return None;
         }
         let mut costs = vec![f32::INFINITY; cuts.len()];
-        let mut paths: Vec<Option<(usize, DetectedComponent)>> = vec![None; cuts.len()];
+        // Best predecessor cut and the tight box (x0, y0, width, height).
+        let mut paths: Vec<Option<(usize, [usize; 4])>> = vec![None; cuts.len()];
         costs[0] = 0.0;
         for end in 1..cuts.len() {
             for start in 0..end {
@@ -665,21 +706,13 @@ impl DigitMatcher {
                 if !costs[start].is_finite() || right - left < min_w || right - left > h {
                     continue;
                 }
-                let mut x0 = right;
-                let mut x1 = left;
-                let mut y0 = h;
-                let mut y1 = 0;
-                for y in 0..h {
-                    for x in left..right {
-                        if comp.mask[y * w + x] > 0 {
-                            x0 = x0.min(x);
-                            x1 = x1.max(x);
-                            y0 = y0.min(y);
-                            y1 = y1.max(y);
-                        }
-                    }
-                }
-                if x0 > x1 || y0 > y1 {
+                let Some(x0) = (left..right).find(|&x| columns[x] > 0) else {
+                    continue;
+                };
+                let x1 = (x0..right).rfind(|&x| columns[x] > 0).unwrap_or(x0);
+                let y0 = (x0..=x1).map(|x| top[x]).min().unwrap_or(0);
+                let y1 = (x0..=x1).map(|x| bottom[x]).max().unwrap_or(0);
+                if y0 > y1 {
                     continue;
                 }
                 let cw = x1 - x0 + 1;
@@ -687,44 +720,51 @@ impl DigitMatcher {
                 if ch < h * 3 / 4 {
                     continue;
                 }
-                let mut mask = Vec::with_capacity(cw * ch);
-                for y in y0..=y1 {
-                    mask.extend_from_slice(&comp.mask[y * w + x0..y * w + x1 + 1]);
-                }
-                let (_, score) = templates.match_glyph(&mask, cw, ch);
+                let (_, score) = templates.match_glyph_region(&comp.mask, w, x0, y0, cw, ch);
                 if score < 0.50 {
                     continue;
                 }
                 let cost = costs[start] + 1.0 - score.clamp(0.0, 1.0) + 0.30;
                 if cost < costs[end] {
                     costs[end] = cost;
-                    paths[end] = Some((
-                        start,
-                        DetectedComponent {
-                            bbox: crate::vision::filter::BoundingBox {
-                                x: comp.bbox.x + x0 as u32,
-                                y: comp.bbox.y + y0 as u32,
-                                width: cw as u32,
-                                height: ch as u32,
-                            },
-                            element: comp.element,
-                            hue: comp.hue,
-                            pixel_count: mask.iter().filter(|&&p| p > 0).count(),
-                            mask,
-                        },
-                    ));
+                    paths[end] = Some((start, [x0, y0, cw, ch]));
                 }
             }
         }
         let mut end = cuts.len() - 1;
-        let mut glyphs = Vec::new();
+        let mut boxes = Vec::new();
         while end > 0 {
-            let (start, glyph) = paths[end].take()?;
-            glyphs.push(glyph);
+            let (start, tight) = paths[end]?;
+            boxes.push(tight);
             end = start;
         }
-        glyphs.reverse();
-        (glyphs.len() >= 2).then_some(glyphs)
+        if boxes.len() < 2 {
+            return None;
+        }
+        // Only the chosen cuts get their own masks.
+        let glyphs = boxes
+            .into_iter()
+            .rev()
+            .map(|[x0, y0, cw, ch]| {
+                let mut mask = Vec::with_capacity(cw * ch);
+                for y in y0..y0 + ch {
+                    mask.extend_from_slice(&comp.mask[y * w + x0..y * w + x0 + cw]);
+                }
+                DetectedComponent {
+                    bbox: crate::vision::filter::BoundingBox {
+                        x: comp.bbox.x + x0 as u32,
+                        y: comp.bbox.y + y0 as u32,
+                        width: cw as u32,
+                        height: ch as u32,
+                    },
+                    element: comp.element,
+                    label: comp.label,
+                    pixel_count: mask.iter().filter(|&&p| p > 0).count(),
+                    mask,
+                }
+            })
+            .collect();
+        Some(glyphs)
     }
 
     pub fn new() -> Self {
@@ -747,7 +787,7 @@ impl DigitMatcher {
                     let mut merged = DetectedComponent {
                         bbox,
                         element: a.element,
-                        hue: a.hue,
+                        label: a.label,
                         pixel_count: 0,
                         mask: vec![0; (bbox.width * bbox.height) as usize],
                     };
@@ -847,6 +887,28 @@ impl DigitMatcher {
         }
 
         vec![(mask.to_vec(), w, h)]
+    }
+
+    /// Read a row of glyphs as one number, or as two when it has a step in
+    /// height or baseline and both sides read as numbers on their own (see
+    /// `ColorFilter::split_row_at_step`). Returns each number with its box.
+    pub fn recognize_row(
+        &self,
+        cluster: &DamageCluster,
+        scale: f32,
+    ) -> Vec<(RecognizedHit, super::filter::BoundingBox)> {
+        if let Some((left, right)) = super::filter::ColorFilter::split_row_at_step(cluster, scale) {
+            if let (Some(a), Some(b)) = (
+                self.recognize_cluster(&left, scale),
+                self.recognize_cluster(&right, scale),
+            ) {
+                return vec![(a, left.bbox), (b, right.bbox)];
+            }
+        }
+        self.recognize_cluster(cluster, scale)
+            .map(|hit| (hit, cluster.bbox))
+            .into_iter()
+            .collect()
     }
 
     /// Recognize an assembled horizontal damage cluster into a damage number
@@ -1076,7 +1138,7 @@ mod tests {
                 height: 24,
             },
             element: ElementType::Pyro,
-            hue: 35,
+            label: 1,
             pixel_count: mask.iter().filter(|&&p| p > 0).count(),
             mask,
         }
@@ -1106,6 +1168,83 @@ mod tests {
             is_crit: true,
         };
         assert!(matcher.recognize_cluster(&cluster, 1.0).is_none());
+    }
+
+    /// A row of template digits, each 16 px wide with a 4 px gap, starting
+    /// at `x` with its top at `y` and scaled to `height`.
+    fn row(digits: &[usize], x: u32, y: u32, height: u32) -> Vec<DetectedComponent> {
+        digits
+            .iter()
+            .enumerate()
+            .map(|(i, &digit)| {
+                let mut g = glyph(digit, x + i as u32 * 20);
+                g.bbox.y = y;
+                if height != 24 {
+                    // Nearest-neighbor resize of the template rows.
+                    let rows: Vec<&[u8]> = g.mask.chunks(16).collect();
+                    let mask: Vec<u8> = (0..height as usize)
+                        .flat_map(|r| rows[r * 24 / height as usize].iter().copied())
+                        .collect();
+                    g.mask = mask;
+                    g.bbox.height = height;
+                }
+                g
+            })
+            .collect()
+    }
+
+    fn cluster_of(glyphs: Vec<DetectedComponent>) -> DamageCluster {
+        let bbox = glyphs.iter().fold(glyphs[0].bbox, |b, g| b.merge(&g.bbox));
+        DamageCluster {
+            element: ElementType::Pyro,
+            bbox,
+            glyphs,
+            is_crit: false,
+        }
+    }
+
+    #[test]
+    fn row_of_two_numbers_is_read_as_two() {
+        // Measured: a 9942 at 40 px with the 216 of a smaller number (35 px,
+        // 7 px lower) directly behind it was read as 9942216.
+        let matcher = DigitMatcher::new();
+        let mut glyphs = row(&[9, 9, 4, 2], 100, 100, 28);
+        glyphs.extend(row(&[2, 5, 6], 180, 104, 24));
+        let read: Vec<u32> = matcher
+            .recognize_row(&cluster_of(glyphs), 1.0)
+            .iter()
+            .map(|(hit, _)| hit.value)
+            .collect();
+        assert_eq!(read, [9942, 256]);
+    }
+
+    #[test]
+    fn row_without_a_step_or_with_one_odd_glyph_stays_one_number() {
+        let matcher = DigitMatcher::new();
+        let values = |glyphs: Vec<DetectedComponent>| -> Vec<u32> {
+            matcher
+                .recognize_row(&cluster_of(glyphs), 1.0)
+                .iter()
+                .map(|(hit, _)| hit.value)
+                .collect()
+        };
+        assert_eq!(values(row(&[9, 9, 4, 2, 2, 5, 6], 100, 100, 24)), [9942256]);
+        // One glyph standing lower is damage, not a second number: cutting
+        // there would shorten the number.
+        let mut glyphs = row(&[2, 5, 2, 8], 100, 100, 24);
+        glyphs.extend(row(&[6], 180, 105, 24));
+        assert!(
+            crate::vision::filter::ColorFilter::split_row_at_step(&cluster_of(glyphs), 1.0)
+                .is_none()
+        );
+        // A step with an unreadable side is not accepted either.
+        let mut glyphs = row(&[9, 9, 4, 2], 100, 100, 28);
+        let mut junk = row(&[2, 5, 6], 180, 104, 24);
+        for g in &mut junk {
+            g.mask.fill(0);
+        }
+        glyphs.extend(junk);
+        assert!(values(glyphs).is_empty());
     }
 
     #[test]

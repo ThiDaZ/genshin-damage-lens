@@ -70,6 +70,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             data,
             screen_x: 0,
             screen_y: 0,
+            labels: None,
         };
         let process_start = Instant::now();
         if manifest.mode == Mode::Frames {
