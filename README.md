@@ -15,7 +15,11 @@
 
 It works only from screen pixels, like a screen recorder. It does **not** read game memory, inject code or modify game files.
 
-<!-- Screenshot: add a capture of the overlay in combat here, e.g. docs/assets/screenshot.png -->
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="GenshinDamageLens overlay tracking live DPS, crits and Pyro damage during Genshin Impact combat" width="720" />
+  <br />
+  <sub><a href="docs/assets/demo.mp4">Watch the full-resolution demo (MP4)</a></sub>
+</p>
 
 ## Features
 
