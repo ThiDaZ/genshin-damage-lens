@@ -336,8 +336,8 @@ fn deskew(mask: &[u8], w: usize, h: usize, slant: f32) -> (Vec<u8>, usize, i64) 
     (out, out_w, lo as i64 - shift(h - 1) as i64)
 }
 
-/// Threads used to label a frame. Four at most, and never more than half the
-/// logical cores: next to a game and a recorder that keep every core busy,
+/// Threads used to label a frame, the calling one included. Four at most,
+/// and never more than half the logical cores: next to a game and a recorder that keep every core busy,
 /// more threads only wait for each other. Measured with all cores loaded,
 /// eight workers took about twice as long per frame as four. `GDL_WORKERS`
 /// overrides the choice for experiments.
@@ -355,6 +355,130 @@ fn label_workers() -> usize {
     })
 }
 
+/// Threads that help label a frame and stay alive between frames.
+///
+/// Starting threads for every frame looked free on an idle machine. Next to a
+/// recorder encoding video on every core, a new thread waited about 13 ms
+/// before it first ran, while the labeling itself took 3 ms per thread: 20 ms
+/// of a 30 ms frame were spent waiting for threads to start. A sleeping thread
+/// is woken much sooner, and `run` never waits for one that is not: the caller
+/// works through the task itself and withdraws the request from every helper
+/// that has not begun.
+struct Helpers {
+    senders: Vec<parking_lot::Mutex<std::sync::mpsc::Sender<Request>>>,
+}
+
+/// One helper's invitation to a task.
+struct Request {
+    task: TaskRef,
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    caller: std::thread::Thread,
+}
+
+/// A borrowed task whose lifetime is vouched for by `Helpers::run`.
+struct TaskRef(*const (dyn Fn() + Sync));
+// SAFETY: the closure is `Sync`, and `run` keeps it alive while any helper
+// may still call it.
+unsafe impl Send for TaskRef {}
+
+const OFFERED: u8 = 0;
+const TAKEN: u8 = 1;
+const FINISHED: u8 = 2;
+const WITHDRAWN: u8 = 3;
+
+impl Helpers {
+    fn new(count: usize) -> Self {
+        let senders = (0..count)
+            .map(|_| {
+                let (sender, receiver) = std::sync::mpsc::channel::<Request>();
+                std::thread::spawn(move || {
+                    use std::sync::atomic::Ordering::SeqCst;
+                    while let Ok(request) = receiver.recv() {
+                        if request
+                            .state
+                            .compare_exchange(OFFERED, TAKEN, SeqCst, SeqCst)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        // Report the end even if the task panics: the caller
+                        // is waiting for it before it lets go of the task.
+                        struct Finish<'a>(&'a Request);
+                        impl Drop for Finish<'_> {
+                            fn drop(&mut self) {
+                                self.0.state.store(FINISHED, SeqCst);
+                                self.0.caller.unpark();
+                            }
+                        }
+                        let finish = Finish(&request);
+                        let outcome =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                // SAFETY: the state is TAKEN, so `run` does not
+                                // return, and the task stays borrowed, until this
+                                // helper stores FINISHED.
+                                unsafe { (*request.task.0)() }
+                            }));
+                        drop(finish);
+                        if outcome.is_err() {
+                            eprintln!("[Vision] a labeling helper panicked");
+                        }
+                    }
+                });
+                parking_lot::Mutex::new(sender)
+            })
+            .collect();
+        Self { senders }
+    }
+
+    /// Run `task` on the calling thread and on every helper that wakes up in
+    /// time. `task` must work through a shared queue until it is empty, so
+    /// that it does not matter how many threads run it. Returns when no
+    /// thread is inside `task` any more.
+    fn run(&self, task: &(dyn Fn() + Sync)) {
+        use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
+        /// Withdraws the invitations and waits for helpers inside the task,
+        /// also when the caller's own run of it panics.
+        struct Settle(Vec<std::sync::Arc<AtomicU8>>);
+        impl Drop for Settle {
+            fn drop(&mut self) {
+                for state in &self.0 {
+                    if state
+                        .compare_exchange(OFFERED, WITHDRAWN, SeqCst, SeqCst)
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    while state.load(SeqCst) != FINISHED {
+                        std::thread::park_timeout(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
+        }
+        // SAFETY of the lifetime change: `Settle` runs before `task` goes out
+        // of scope, and after it no helper holds or will use the pointer.
+        let erased: *const (dyn Fn() + Sync) = unsafe { std::mem::transmute(task) };
+        let mut settle = Settle(Vec::with_capacity(self.senders.len()));
+        for sender in &self.senders {
+            let state = std::sync::Arc::new(AtomicU8::new(OFFERED));
+            let request = Request {
+                task: TaskRef(erased),
+                state: state.clone(),
+                caller: std::thread::current(),
+            };
+            if sender.lock().send(request).is_ok() {
+                settle.0.push(state);
+            }
+        }
+        task();
+        drop(settle);
+    }
+}
+
+fn helpers() -> &'static Helpers {
+    static HELPERS: std::sync::OnceLock<Helpers> = std::sync::OnceLock::new();
+    HELPERS.get_or_init(|| Helpers::new(label_workers() - 1))
+}
+
 /// A maximal horizontal stretch of equally labeled pixels.
 struct Run {
     x0: u32,
@@ -366,15 +490,42 @@ struct Run {
     seeded: bool,
 }
 
+/// How one frame's segmentation went, for the live diagnostics.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SegmentStats {
+    /// Labeling the pixels, or taking over the labels that came with the
+    /// frame, and cutting the rows into runs.
+    pub label: std::time::Duration,
+    /// Connected components and glyph masks.
+    pub components: std::time::Duration,
+    /// Row bands of the labeling step done by the calling thread.
+    pub bands_caller: u32,
+    /// Row bands done by helper threads that woke up in time.
+    pub bands_helpers: u32,
+    /// The labels came with the frame, computed on the graphics card.
+    pub gpu_labels: bool,
+}
+
 /// Classify every pixel once, across cores, and collect the row runs that
 /// connected-component labeling works on. Everything downstream compares
 /// bytes or whole runs instead of re-deriving colors per pixel.
-fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
+///
+/// A frame that brings its labels along (see `RawFrame::labels`) skips the
+/// classification: its label rows are copied instead. Everything after that
+/// one step is the same code for both sources, so equal labels give equal
+/// results.
+fn label_frame(
+    frame: &RawFrame,
+    zones: &HudZones,
+    stats: &mut SegmentStats,
+) -> (Vec<u8>, Vec<Run>) {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let stride = frame.stride;
     let data = &frame.data;
     let table = label_table();
+    let supplied = frame.labels.as_deref().filter(|l| l.len() == w * h);
+    stats.gpu_labels = supplied.is_some();
 
     // Dynamic combat viewport boundaries
     let y_min = (h as f32 * 0.08) as usize; // Exclude top status/header
@@ -390,84 +541,107 @@ fn label_frame(frame: &RawFrame, zones: &HudZones) -> (Vec<u8>, Vec<Run>) {
         .unwrap_or(w);
 
     let mut labels = vec![0u8; w * h];
-    let workers = label_workers();
     // Rows far above or below the combat viewport cannot hold an accepted
     // component: anything reaching past the 8 % / 91 % lines is rejected. One
     // row beyond each line is kept so such a component is still seen crossing.
     let row_lo = ((h as f32 * 0.08).ceil() as usize).saturating_sub(1);
     let row_hi = ((h as f32 * 0.91) as usize + 2).min(h);
-    let band = (row_hi - row_lo).div_ceil(workers).max(1);
-    let mut runs = Vec::new();
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = labels[row_lo * w..row_hi * w]
-            .chunks_mut(band * w)
-            .enumerate()
-            .map(|(bi, chunk)| {
-                scope.spawn(move || {
-                    let mut runs: Vec<Run> = Vec::with_capacity(4096);
-                    for (ry, row) in chunk.chunks_exact_mut(w).enumerate() {
-                        let y = row_lo + bi * band + ry;
-                        let start = y * stride;
-                        let pixels = &data[start..start + w * 4];
-                        let zy = zones.rows[y];
-                        let skill_row = zy & SKILL_ZONE != 0;
-                        // The coarse scan only looks at even rows and columns.
-                        let scan_row = y % 2 == 0 && (y_min..y_max).contains(&y);
-                        // Two tight passes: classify the row, then cut it
-                        // into runs. Mixing them kept the compiler from
-                        // producing a simple loop for either.
-                        for (label, px) in row.iter_mut().zip(pixels.chunks_exact(4)) {
-                            // BGRA format from DXGI
-                            *label = table.label(px[2], px[1], px[0]);
-                        }
-                        // Skill icons and cooldown digits are a wall.
-                        if skill_row {
-                            row[skill_from..].fill(0);
-                        }
-                        let mut x = 0;
-                        while x < w {
-                            // Background comes in long stretches: skip it
-                            // eight pixels at a time.
-                            if let Some(word) = row.get(x..x + 8) {
-                                if word == [0u8; 8] {
-                                    x += 8;
-                                    continue;
-                                }
-                            }
-                            let value = row[x];
-                            if value == 0 {
-                                x += 1;
-                                continue;
-                            }
-                            let x0 = x;
-                            while x < w && row[x] == value {
-                                x += 1;
-                            }
-                            runs.push(Run {
-                                x0: x0 as u32,
-                                x1: x as u32,
-                                y: y as u32,
-                                label: value,
-                                seeded: false,
-                            });
-                        }
-                        if scan_row {
-                            for run in runs.iter_mut().rev().take_while(|r| r.y == y as u32) {
-                                let from = (run.x0 as usize).max(x_min).next_multiple_of(2);
-                                let to = (run.x1 as usize).min(x_max);
-                                run.seeded =
-                                    (from..to).step_by(2).any(|x| zones.columns[x] & zy == 0);
-                            }
-                        }
+    // Several bands per thread: the calling thread takes the next band
+    // whenever it is free, so a helper that is slow to wake costs nothing.
+    let band = (row_hi - row_lo).div_ceil(label_workers() * 4).max(1);
+    let label_band = |bi: usize, chunk: &mut [u8]| {
+        let mut runs: Vec<Run> = Vec::with_capacity(4096);
+        for (ry, row) in chunk.chunks_exact_mut(w).enumerate() {
+            let y = row_lo + bi * band + ry;
+            let start = y * stride;
+            let pixels = &data[start..start + w * 4];
+            let zy = zones.rows[y];
+            let skill_row = zy & SKILL_ZONE != 0;
+            // The coarse scan only looks at even rows and columns.
+            let scan_row = y % 2 == 0 && (y_min..y_max).contains(&y);
+            // Two tight passes: classify the row, then cut it into runs.
+            // Mixing them kept the compiler from producing a simple loop for
+            // either.
+            match supplied {
+                Some(labels) => row.copy_from_slice(&labels[y * w..(y + 1) * w]),
+                None => {
+                    for (label, px) in row.iter_mut().zip(pixels.chunks_exact(4)) {
+                        // BGRA format from DXGI
+                        *label = table.label(px[2], px[1], px[0]);
                     }
-                    runs
-                })
-            })
-            .collect();
-        for handle in handles {
-            runs.extend(handle.join().expect("label worker panicked"));
+                }
+            }
+            // Skill icons and cooldown digits are a wall.
+            if skill_row {
+                row[skill_from..].fill(0);
+            }
+            let mut x = 0;
+            while x < w {
+                // Background comes in long stretches: skip it eight pixels at
+                // a time.
+                if let Some(word) = row.get(x..x + 8) {
+                    if word == [0u8; 8] {
+                        x += 8;
+                        continue;
+                    }
+                }
+                let value = row[x];
+                if value == 0 {
+                    x += 1;
+                    continue;
+                }
+                let x0 = x;
+                while x < w && row[x] == value {
+                    x += 1;
+                }
+                runs.push(Run {
+                    x0: x0 as u32,
+                    x1: x as u32,
+                    y: y as u32,
+                    label: value,
+                    seeded: false,
+                });
+            }
+            if scan_row {
+                for run in runs.iter_mut().rev().take_while(|r| r.y == y as u32) {
+                    let from = (run.x0 as usize).max(x_min).next_multiple_of(2);
+                    let to = (run.x1 as usize).min(x_max);
+                    run.seeded = (from..to).step_by(2).any(|x| zones.columns[x] & zy == 0);
+                }
+            }
+        }
+        runs
+    };
+
+    let bands = parking_lot::Mutex::new(
+        labels[row_lo * w..row_hi * w]
+            .chunks_mut(band * w)
+            .enumerate(),
+    );
+    let done = parking_lot::Mutex::new(Vec::new());
+    let caller = std::thread::current().id();
+    helpers().run(&|| {
+        let own = std::thread::current().id() == caller;
+        loop {
+            // The lock covers only taking the next band, not working on it.
+            let next = bands.lock().next();
+            let Some((bi, chunk)) = next else {
+                break;
+            };
+            let runs = label_band(bi, chunk);
+            done.lock().push((bi, runs, own));
         }
     });
+    drop(bands);
+    let mut done = done.into_inner();
+    let by_caller = done.iter().filter(|part| part.2).count() as u32;
+    stats.bands_caller += by_caller;
+    stats.bands_helpers += done.len() as u32 - by_caller;
+    done.sort_unstable_by_key(|part| part.0);
+    let mut runs = Vec::with_capacity(done.iter().map(|part| part.1.len()).sum());
+    for (_, part, _) in done {
+        runs.extend(part);
+    }
     (labels, runs)
 }
 
@@ -555,6 +729,36 @@ fn label_table() -> &'static LabelTable {
     TABLE.get_or_init(LabelTable::build)
 }
 
+/// The label of every 24-bit color as one flat table of 16 MB, indexed by
+/// `r << 16 | g << 8 | b`. The graphics card labels pixels by looking them up
+/// in a copy of this table, so its answers are `label_pixel`'s by construction.
+pub fn flat_label_table() -> Vec<u8> {
+    let table = label_table();
+    let mut flat = vec![0u8; 1 << 24];
+    for (r, plane) in flat.chunks_exact_mut(1 << 16).enumerate() {
+        for (g, row) in plane.chunks_exact_mut(256).enumerate() {
+            for (b, label) in row.iter_mut().enumerate() {
+                *label = table.label(r as u8, g as u8, b as u8);
+            }
+        }
+    }
+    flat
+}
+
+/// Label every pixel of a BGRA image on the processor, rows packed. This is
+/// the reference that labels computed on the graphics card are checked against.
+pub fn label_bgra(data: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
+    let table = label_table();
+    let mut labels = vec![0u8; width * height];
+    for (y, row) in labels.chunks_exact_mut(width.max(1)).enumerate() {
+        let pixels = &data[y * stride..y * stride + width * 4];
+        for (label, px) in row.iter_mut().zip(pixels.chunks_exact(4)) {
+            *label = table.label(px[2], px[1], px[0]);
+        }
+    }
+    labels
+}
+
 #[derive(Clone, Copy)]
 struct Extent {
     min_x: u32,
@@ -603,6 +807,15 @@ pub struct ColorFilter;
 impl ColorFilter {
     /// Segments candidate text components from a raw frame
     pub fn segment_frame(frame: &RawFrame) -> Vec<DetectedComponent> {
+        Self::segment_frame_timed(frame, &mut SegmentStats::default())
+    }
+
+    /// `segment_frame`, also reporting where the time went.
+    pub fn segment_frame_timed(
+        frame: &RawFrame,
+        stats: &mut SegmentStats,
+    ) -> Vec<DetectedComponent> {
+        let started = std::time::Instant::now();
         let w = frame.width as usize;
         let h = frame.height as usize;
         let stride = frame.stride;
@@ -612,7 +825,8 @@ impl ColorFilter {
 
         let scale = (h as f32 / 720.0).max(1.0);
         let zones = HudZones::new(w, h);
-        let (labels, runs) = label_frame(frame, &zones);
+        let (labels, runs) = label_frame(frame, &zones, stats);
+        stats.label = started.elapsed();
 
         // Connected components over runs: union overlapping same-label runs of
         // adjacent rows (4-connectivity). The smaller index stays the root, so
@@ -669,14 +883,16 @@ impl ColorFilter {
             e.seeded |= run.seeded;
         }
 
-        extents
+        let components = extents
             .iter()
             .enumerate()
             .filter_map(|(root, extent)| {
                 let extent = extent.as_ref().filter(|e| e.seeded)?;
                 Self::build_component(frame, &labels, &runs[root], extent, scale)
             })
-            .collect()
+            .collect();
+        stats.components = started.elapsed() - stats.label;
+        components
     }
 
     /// Calculate ratio of dark pixels immediately surrounding a bounding box
@@ -1301,6 +1517,7 @@ mod tests {
             data: vec![170; 32 * 32 * 4],
             screen_x: 0,
             screen_y: 0,
+            labels: None,
         };
         let mask = vec![255; 8 * 16];
         for y in 8..24 {
@@ -1342,6 +1559,7 @@ mod tests {
             data: vec![0; w * h * 4],
             screen_x: 0,
             screen_y: 0,
+            labels: None,
         };
         let mut fill = |x0: usize, y0: usize, bw: usize, bh: usize, rgb: (u8, u8, u8)| {
             for y in y0..y0 + bh {
@@ -1398,6 +1616,7 @@ mod tests {
             data: vec![0; w * h * 4],
             screen_x: 0,
             screen_y: 0,
+            labels: None,
         };
         let draw = |frame: &mut RawFrame, left: usize, top: usize| {
             for y in 0..40usize {
@@ -1430,6 +1649,29 @@ mod tests {
             assert!((8..=9).contains(&glyph.bbox.width), "{:?}", glyph.bbox);
             assert!(glyph.bbox.x.abs_diff(left) <= 1, "{:?}", glyph.bbox);
             assert_eq!(glyph.pixel_count, 8 * 40);
+        }
+    }
+
+    #[test]
+    fn helpers_work_through_a_queue_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        // With or without help, and however late a helper wakes up, every
+        // item is handled once and `run` returns only when all are done.
+        let pool = Helpers::new(3);
+        for round in 0..200 {
+            let items: Vec<AtomicUsize> = (0..64).map(|_| AtomicUsize::new(0)).collect();
+            let next = AtomicUsize::new(0);
+            pool.run(&|| loop {
+                let i = next.fetch_add(1, SeqCst);
+                let Some(item) = items.get(i) else {
+                    break;
+                };
+                item.fetch_add(1, SeqCst);
+            });
+            assert!(
+                items.iter().all(|item| item.load(SeqCst) == 1),
+                "round {round}"
+            );
         }
     }
 
