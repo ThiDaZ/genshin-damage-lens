@@ -7,10 +7,18 @@ pub struct RawFrame {
     pub data: Vec<u8>,
     pub screen_x: i32,
     pub screen_y: i32,
+    /// One segmentation label per pixel (`width * height` bytes, rows packed),
+    /// equal to `vision::filter::label_pixel` of `data`, when the capture
+    /// computed them on the graphics card. `None` everywhere else (replays,
+    /// tests, capture on the processor): the vision code then labels `data`
+    /// itself.
+    pub labels: Option<Vec<u8>>,
 }
 
 #[cfg(windows)]
 pub mod dxgi;
+#[cfg(windows)]
+pub mod gpu_labels;
 pub mod window_finder;
 
 pub trait CaptureBackend: Send + Sync {
@@ -64,6 +72,8 @@ pub struct ScreenCapture {
     backend: Option<dxgi::DxgiCapture>,
     #[cfg(windows)]
     retry_after: std::time::Instant,
+    /// Label pixels on the graphics card when the backend can.
+    gpu_labels: bool,
 }
 
 impl ScreenCapture {
@@ -74,11 +84,12 @@ impl ScreenCapture {
             Self {
                 backend,
                 retry_after: std::time::Instant::now(),
+                gpu_labels: true,
             }
         }
         #[cfg(not(windows))]
         {
-            Self {}
+            Self { gpu_labels: true }
         }
     }
 
@@ -97,6 +108,8 @@ impl ScreenCapture {
                 }
             }
             if let Some(backend) = &mut self.backend {
+                // Also after the backend was recreated.
+                backend.set_gpu_labels(self.gpu_labels);
                 match backend.capture_frame() {
                     Ok(outcome) => return outcome,
                     Err(_) => {
@@ -116,10 +129,37 @@ impl ScreenCapture {
     pub fn recycle(&mut self, frame: RawFrame) {
         #[cfg(windows)]
         if let Some(backend) = &mut self.backend {
-            backend.recycle(frame.data);
+            backend.recycle(frame);
         }
         #[cfg(not(windows))]
         drop(frame);
+    }
+
+    /// Choose where pixels are labeled: on the graphics card (the default)
+    /// or on the processor. Without a working shader path the processor does
+    /// it whatever is chosen here.
+    pub fn set_gpu_labels(&mut self, enabled: bool) {
+        self.gpu_labels = enabled;
+    }
+
+    /// Why labeling on the graphics card is not possible, if the capture
+    /// backend is running and found that out.
+    pub fn gpu_labels_error(&self) -> Option<String> {
+        #[cfg(windows)]
+        if let Some(backend) = &self.backend {
+            return backend.gpu_labels_error().map(str::to_owned);
+        }
+        None
+    }
+
+    /// The graphics adapter that captures the display and, when asked to,
+    /// labels the pixels. Empty while no capture backend is running.
+    pub fn adapter_name(&self) -> String {
+        #[cfg(windows)]
+        if let Some(backend) = &self.backend {
+            return backend.adapter_name().to_owned();
+        }
+        String::new()
     }
 
     /// Milliseconds spent copying and reading back the last delivered frame.
